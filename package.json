@@ -13,7 +13,9 @@
     },
     "./style/prosemirror.css": "./style/prosemirror.css"
   },
-  "sideEffects": ["./style/prosemirror.css"],
+  "sideEffects": [
+    "./style/prosemirror.css"
+  ],
   "style": "style/prosemirror.css",
   "license": "MIT",
   "maintainers": [

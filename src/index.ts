@@ -144,6 +144,16 @@ export class EditorView {
     this.update(updated)
   }
 
+  onScroll() {
+    this.domObserver.stop()
+    const { viewport } = this._props;
+    viewport && this.docView.updateViewport(this, {
+      offsetTop: viewport.getScrollTop() - viewport.getOffsetToScroller(),
+      offsetHeight: viewport.getScrollHeight(),
+    });
+    this.domObserver.start()
+  }
+
   /// Update the editor's `state` prop, without touching any of the
   /// other props.
   updateState(state: EditorState) {
@@ -201,6 +211,11 @@ export class EditorView {
           this.docView.destroy()
           this.docView = docViewDesc(state.doc, outerDeco, innerDeco, this.dom, this)
         }
+        const { viewport } = this._props;
+        viewport && this.docView.updateViewport(this, {
+          offsetTop: viewport.getScrollTop() - viewport.getOffsetToScroller(),
+          offsetHeight: viewport.getScrollHeight(),
+        });
         if (chromeKludge && !this.trackWrites) forceSelUpdate = true
       }
       // Work around for an issue where an update arriving right between
@@ -777,4 +792,10 @@ export interface DirectEditorProps extends EditorProps {
   /// [applied](#state.EditorState.apply). The callback will be bound to have
   /// the view instance as its `this` binding.
   dispatchTransaction?: (tr: Transaction) => void
+
+  viewport?: {
+    getScrollTop(): number;
+    getScrollHeight(): number;
+    getOffsetToScroller(): number;
+  },
 }
