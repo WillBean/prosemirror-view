@@ -179,6 +179,9 @@ export class ViewRenderer {
     isDirty: true,
   }
 
+  /**
+   * 预渲染区节点
+   */
   protected prerenderPool?: HTMLElement;
 
   constructor(
@@ -194,6 +197,9 @@ export class ViewRenderer {
     }
   }
 
+  /**
+   * 更新当前节点的布局信息，更新完成 isDirty 为 false
+   */
   layout() {
     if (!this.node || this.node.isInline || !(this.dom instanceof HTMLElement)) return;
     if (!this.dom.isConnected) {
@@ -213,6 +219,14 @@ export class ViewRenderer {
     // TODO: update parent layout
   }
 
+  /**
+   * 计算视口信息
+   * 返回:
+   * 当前视口应该被挂载的节点 {mounts}
+   * 应该被卸载的节点 {unmounts}
+   * 当前视口内的节点 {viewportNodes}
+   * 当前 buffer 内的节点 {bufferNodes}
+   */
   private calculateViewport(viewport: IViewport, buffer = 0) {
     const shouldMountNodes = new Set<ViewRenderer>();
     const bufferNodes = new Set<ViewRenderer>();
@@ -264,6 +278,14 @@ export class ViewRenderer {
     return { mounts, unmounts, shouldMountNodes, viewportNodes, bufferNodes };
   }
 
+  /**
+   * 虚拟滚动核心更新函数
+   * 1. 根据视口信息，计算出视口内应该被挂载或卸载的节点
+   * 2. 对需要卸载的节点计算 layout，保证准确性（读 DOM）
+   * 3. 对需要挂载的节点判断是否已经渲染，如否，则先进行渲染
+   * 4. 对可能变化的节点递归处理其子节点的视口情况
+   * 5. 挂载或卸载相应节点，更新 Placeholder
+   */
   updateViewport(view: EditorView, viewport: IViewport, buffer = 0) {
     if (this.node?.isTextblock) return;
 
@@ -357,6 +379,9 @@ export class ViewRenderer {
     });
   }
 
+  /**
+   * 对传入的 mounts 和 unmounts 节点进行挂载和卸载
+   */
   mountChildren(mounts?: Set<ViewRenderer>, unmounts?: Set<ViewRenderer>) {
     // validate
     mounts = new Set(mounts && Array.from(mounts).filter(node => !this.mountedNodes.has(node)));
