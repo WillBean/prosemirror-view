@@ -104,9 +104,17 @@ interface ILayoutInfo extends IStyle {
   isDirty: boolean;
 }
 
+interface IRect extends IStyle {
+  top: number;
+  bottom: number;
+  left: number;
+  node: ViewDescRenderer;
+}
+
 interface IViewport {
-  offsetTop: number;
-  offsetHeight: number;
+  buffer?: number,
+  scrollTop: number;
+  scrollHeight: number;
 }
 
 interface IPlaceholderInfo {
@@ -141,7 +149,7 @@ class PlaceholderInfo {
   }
 }
 
-export class ViewRenderer {
+export class ViewDescRenderer {
   placeholderPool: PlaceholderInfo[] = [];
 
   node!: Node | null
@@ -149,7 +157,7 @@ export class ViewRenderer {
   /**
    * 当前所有已经挂载的节点列表
    */
-  mountedNodes = new Set<ViewRenderer>();
+  mountedNodes = new Set<ViewDescRenderer>();
 
   /**
    * 该节点是否保留在 DOM 不卸载
@@ -184,6 +192,8 @@ export class ViewRenderer {
    */
   protected prerenderPool?: HTMLElement;
 
+  private rects: IRect[] | null = null;
+
   constructor(
     public parent: ViewDesc | undefined,
     public children: ViewDesc[],
@@ -195,6 +205,49 @@ export class ViewRenderer {
       this.isRendered = true;
       this.initPrerenderPool();
     }
+  }
+
+  get mode() {
+    return this.node?.type.spec.layoutMode;
+  }
+
+  getRects(): IRect[] {
+    if (this.rects) return this.rects;
+
+    this.rects = this.mode === LayoutMode.Horizontal ?
+      this.children.map((child) => {
+        const { height, marginTop, marginBottom, offsetTopToParent } = child.layoutInfo;
+        return {
+          top: 0, // TODO:
+          left: 0,
+          height,
+          marginTop,
+          marginBottom,
+          bottom: height + marginBottom,
+          node: child,
+        }
+      }) :
+    this.children
+      .reduce<IRect[]>((layouts, child, index) => {
+        const last = layouts[index - 1] ?? { top: 0, marginBottom: 0, height: 0 };
+        const { height, marginTop, marginBottom, offsetTopToParent } = child.layoutInfo!;
+        const curTop = last.top + last.height + Math.max(last.marginBottom, marginTop) + offsetTopToParent;
+        layouts.push({
+          left: 0,
+          top: curTop,
+          bottom: curTop + height,
+          marginTop,
+          marginBottom,
+          height,
+          node: child,
+        });
+        return layouts;
+      }, []);
+    return this.rects;
+  }
+
+  clearRects() {
+    this.rects = null;
   }
 
   /**
@@ -217,6 +270,7 @@ export class ViewRenderer {
     };
 
     // TODO: update parent layout
+    this.clearRects();
   }
 
   /**
@@ -227,44 +281,39 @@ export class ViewRenderer {
    * 当前视口内的节点 {viewportNodes}
    * 当前 buffer 内的节点 {bufferNodes}
    */
-  private calculateViewport(viewport: IViewport, buffer = 0) {
-    const shouldMountNodes = new Set<ViewRenderer>();
-    const bufferNodes = new Set<ViewRenderer>();
-    const viewportNodes = new Set<ViewRenderer>();
+  private calculateViewport(viewport: IViewport) {
+    const shouldMountNodes = new Set<ViewDescRenderer>();
+    const bufferNodes = new Set<ViewDescRenderer>();
+    const viewportNodes = new Set<ViewDescRenderer>();
 
-    const { offsetTop, offsetHeight } = viewport;
-    const layouts = this.children.map(child => child.layoutInfo);
-    const mode = this.node?.type.spec.layoutMode;
+    const { scrollTop, scrollHeight, buffer = 0 } = viewport;
+    const scrollBottom = scrollTop + scrollHeight;
+    const isHorizontal = this.mode === LayoutMode.Horizontal;
 
-    for (let i = 0, top = 0, lastMarginBottom = 0; i < layouts.length; i++) {
-      const child = this.children[i];
-      const layout = layouts[i];
-
-      if (!layout) continue;
-
-      const { height, marginTop, marginBottom, offsetTopToParent } = layout;
-      const nodeTop = top + Math.max(lastMarginBottom, marginTop);
-      const nodeBottom = top + height + marginBottom;
+    const rects = this.getRects();
+    for (let i = 0; i < rects.length; i++) {
+      const rect = rects[i];
+      const { top, bottom, node } = rect;
 
       if ( // in buffer
-        offsetTop - buffer <= nodeBottom &&
-        offsetTop + offsetHeight + buffer >= nodeTop
+        scrollTop - buffer <= bottom &&
+        scrollBottom + buffer >= top
       ) {
-        shouldMountNodes.add(child);
+        shouldMountNodes.add(node);
 
         if ( // in viewport
-          offsetTop <= nodeBottom &&
-          offsetTop + offsetHeight >= nodeTop
+          scrollTop <= bottom &&
+          scrollBottom >= top
         ) {
-          viewportNodes.add(child);
+          viewportNodes.add(node);
         } else {
-          bufferNodes.add(child);
+          bufferNodes.add(node);
         }
       }
 
-      if (mode !== LayoutMode.Horizontal) {
-        top = nodeBottom;
-        lastMarginBottom = marginBottom;
+      // 提前结束循环，看是否需要改成二分法计算
+      if (!isHorizontal && scrollBottom < top) {
+        break;
       }
     }
 
@@ -275,7 +324,7 @@ export class ViewRenderer {
       return !this.mountedNodes.has(node);
     }));
 
-    return { mounts, unmounts, shouldMountNodes, viewportNodes, bufferNodes };
+    return { mounts, unmounts, viewportNodes, bufferNodes };
   }
 
   /**
@@ -286,10 +335,10 @@ export class ViewRenderer {
    * 4. 对可能变化的节点递归处理其子节点的视口情况
    * 5. 挂载或卸载相应节点，更新 Placeholder
    */
-  updateViewport(view: EditorView, viewport: IViewport, buffer = 0) {
+  updateViewport(view: EditorView, viewport: IViewport) {
     if (this.node?.isTextblock) return;
 
-    const { mounts, unmounts } = this.calculateViewport(viewport, buffer);
+    const { mounts, unmounts, viewportNodes, bufferNodes } = this.calculateViewport(viewport);
 
     // 先读 dom
     this.layoutChildren(unmounts);
@@ -298,19 +347,20 @@ export class ViewRenderer {
     this.ensureChildrenRendered(view, mounts);
 
     // 再调用子节点的 update
-    this.updateDescendantViewport(view, mounts, unmounts, viewport, buffer);
+    this.updateDescendantViewport(view, mounts, viewportNodes, bufferNodes, viewport);
 
     // 最后写 dom
     const { mounts: realMounts, unmounts: realUnmounts } = this.mountChildren(mounts, unmounts);
 
     // TODO: force update layout
     requestAnimationFrame(() => {
+      this.clearRects();
       this.layoutChildren(mounts);
     });
 
   }
 
-  private ensureChildrenRendered(view: EditorView, mounts: Set<ViewRenderer>, parentPos?: number) {
+  private ensureChildrenRendered(view: EditorView, mounts: Set<ViewDescRenderer>, parentPos?: number) {
     if (!Array.from(mounts).find(child => !child.isRendered)) return;
     const pos = parentPos ?? (this instanceof NodeViewDesc && this.parent?.posBeforeChild(this) || 0);
     return this.children.reduce((pos, child, index) => {
@@ -334,55 +384,33 @@ export class ViewRenderer {
     }, pos + 1);
   }
 
-  private updateDescendantViewport(view: EditorView, mounts: Set<ViewRenderer>, unmounts: Set<ViewRenderer>, viewport: IViewport, buffer = 0) {
-    const { offsetTop, offsetHeight } = viewport;
-    const mode = this.node?.type.spec.layoutMode;
-    // TODO: layouts 计算提到外面，减少计算次数
-    const layouts = mode === LayoutMode.Horizontal ?
-      this.children.map((child) => {
-        const { height, marginBottom, offsetTopToParent } = child.layoutInfo;
-        return {
-          top: 0,
-          height,
-          marginBottom,
-          bottom: height + marginBottom,
-          node: child,
-        }
-      }) :
-      this.children
-        .reduce<{ top: number, bottom: number, height: number, marginBottom: number, node: ViewRenderer }[]>((layouts, child, index) => {
-          const last = layouts[index - 1] ?? { top: 0, marginBottom: 0, height: 0 };
-          const { height, marginTop, marginBottom, offsetTopToParent } = child.layoutInfo!;
-          const curTop = last.top + last.height + Math.max(last.marginBottom, marginTop) + offsetTopToParent;
-          layouts.push({
-            top: curTop,
-            bottom: curTop + height,
-            marginBottom,
-            height,
-            node: child,
-          });
-          return layouts;
-        }, [])
-        .filter(({ node }) => {
-          return this.mountedNodes.has(node) || mounts.has(node) || unmounts.has(node);
-        });
+  /**
+   * 为减少计算量，不对 unmount 的子节点再进行卸载
+   * 仅对 mounts 和 this.mountedNodes 中处于视口边界的两个节点计算。
+   */
+  private updateDescendantViewport(view: EditorView, mounts: Set<ViewDescRenderer>, viewportNodes: Set<ViewDescRenderer>, bufferNodes: Set<ViewDescRenderer>, viewport: IViewport) {
+    const { scrollTop, scrollHeight, buffer } = viewport;
+    const [first, ...rest] = bufferNodes.size ? bufferNodes : viewportNodes;
+    const edgeNodes = new Set([first, rest[rest.length - 1]]);
+    const layouts = this.getRects().filter(({ node }) => mounts.has(node) || edgeNodes.has(node));
     layouts.forEach(({ node, top, bottom, height }) => {
       // TODO: 改回高度
-      const childViewportHeight = offsetTop <= top && bottom <= offsetTop + offsetHeight ?
+      const childViewportHeight = scrollTop <= top && bottom <= scrollTop + scrollHeight ?
         Infinity :
-        overlapHeight({ top: offsetTop, bottom: offsetTop + offsetHeight }, { top, bottom });
+        overlapHeight({ top: scrollTop, bottom: scrollTop + scrollHeight }, { top, bottom });
 
       node.updateViewport(view, {
-        offsetTop: Math.max(offsetTop - top, 0),
-        offsetHeight: childViewportHeight,
-      }, buffer);
+        buffer,
+        scrollTop: Math.max(scrollTop - top, 0),
+        scrollHeight: childViewportHeight,
+      });
     });
   }
 
   /**
    * 对传入的 mounts 和 unmounts 节点进行挂载和卸载
    */
-  mountChildren(mounts?: Set<ViewRenderer>, unmounts?: Set<ViewRenderer>) {
+  mountChildren(mounts?: Set<ViewDescRenderer>, unmounts?: Set<ViewDescRenderer>) {
     // validate
     mounts = new Set(mounts && Array.from(mounts).filter(node => !this.mountedNodes.has(node)));
     unmounts = new Set(unmounts && Array.from(unmounts).filter(node => !node.keep && this.mountedNodes.has(node)));
@@ -399,12 +427,12 @@ export class ViewRenderer {
       const style = this.calculateStyle(layouts, info.range);
       this.updatePlaceholderStyle(info, style);
     });
-    const arr = this.children.reduce<(ViewRenderer | IPlaceholderInfo)[]>((arr, child, index) => {
+    const arr = this.children.reduce<(ViewDescRenderer | IPlaceholderInfo)[]>((arr, child, index) => {
       if (this.mountedNodes.has(child)) {
         arr.push(child);
       } else {
         const last = arr[arr.length - 1];
-        if (!last || last instanceof ViewRenderer) {
+        if (!last || last instanceof ViewDescRenderer) {
           arr.push(placeholderInfos.shift()!);
         }
       }
@@ -417,7 +445,7 @@ export class ViewRenderer {
     return { mounts, unmounts };
   }
 
-  ensureChildMounted(child: ViewRenderer) {
+  ensureChildMounted(child: ViewDescRenderer) {
     if (this.isRoot && !this.mountedNodes.has(child)) {
       this.prerenderPool?.appendChild(child.dom);
     } else this.mountChildren(new Set([child]));
@@ -498,13 +526,13 @@ export class ViewRenderer {
     this.dom.parentElement?.appendChild(this.prerenderPool);
   }
 
-  private layoutChildren(children: Set<ViewRenderer>) {
+  private layoutChildren(children: Set<ViewDescRenderer>) {
     children.forEach(child => child.layout());
   }
 }
 // Superclass for the various kinds of descriptions. Defines their
 // basic structure and shared methods.
-export class ViewDesc extends ViewRenderer {
+export class ViewDesc extends ViewDescRenderer {
   dirty = NOT_DIRTY
   node!: Node | null
 

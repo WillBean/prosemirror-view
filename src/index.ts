@@ -120,6 +120,11 @@ export class EditorView {
     return this._props
   }
 
+  /**
+   *
+   */
+  getLayoutInfo(pos: number) {}
+
   /// Update the view's props. Will immediately cause an update to
   /// the DOM.
   update(props: DirectEditorProps) {
@@ -148,8 +153,9 @@ export class EditorView {
     this.domObserver.stop()
     const { viewport } = this._props;
     viewport && this.docView.updateViewport(this, {
-      offsetTop: viewport.getScrollTop() - viewport.getOffsetToScroller(),
-      offsetHeight: viewport.getScrollHeight(),
+      buffer: viewport.getBuffer?.(),
+      scrollTop: viewport.getScrollTop() - viewport.getOffsetToScroller(),
+      scrollHeight: viewport.getScrollHeight(),
     });
     this.domObserver.start()
   }
@@ -213,8 +219,9 @@ export class EditorView {
         }
         const { viewport } = this._props;
         viewport && this.docView.updateViewport(this, {
-          offsetTop: viewport.getScrollTop() - viewport.getOffsetToScroller(),
-          offsetHeight: viewport.getScrollHeight(),
+          buffer: viewport.getBuffer?.(),
+          scrollTop: viewport.getScrollTop() - viewport.getOffsetToScroller(),
+          scrollHeight: viewport.getScrollHeight(),
         });
         if (chromeKludge && !this.trackWrites) forceSelUpdate = true
       }
@@ -794,6 +801,7 @@ export interface DirectEditorProps extends EditorProps {
   dispatchTransaction?: (tr: Transaction) => void
 
   viewport?: {
+    getBuffer?(): number;
     getScrollTop(): number;
     getScrollHeight(): number;
     getOffsetToScroller(): number;
