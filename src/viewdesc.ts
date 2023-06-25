@@ -227,27 +227,31 @@ export class ViewDescRenderer {
           node: child,
         }
       }) :
-    this.children
-      .reduce<IRect[]>((layouts, child, index) => {
-        const last = layouts[index - 1] ?? { top: 0, marginBottom: 0, height: 0 };
-        const { height, marginTop, marginBottom, offsetTopToParent } = child.layoutInfo!;
-        const curTop = last.top + last.height + Math.max(last.marginBottom, marginTop) + offsetTopToParent;
-        layouts.push({
-          left: 0,
-          top: curTop,
-          bottom: curTop + height,
-          marginTop,
-          marginBottom,
-          height,
-          node: child,
-        });
-        return layouts;
-      }, []);
+      this.children
+        .reduce<IRect[]>((layouts, child, index) => {
+          const last = layouts[index - 1] ?? { top: 0, marginBottom: 0, height: 0 };
+          const { height, marginTop, marginBottom, offsetTopToParent } = child.layoutInfo!;
+          const curTop = last.top + last.height + Math.max(last.marginBottom, marginTop) + offsetTopToParent;
+          layouts.push({
+            left: 0,
+            top: curTop,
+            bottom: curTop + height,
+            marginTop,
+            marginBottom,
+            height,
+            node: child,
+          });
+          return layouts;
+        }, []);
     return this.rects;
   }
 
   clearRects() {
     this.rects = null;
+  }
+
+  markLayoutDirty() {
+    this.layoutInfo.isDirty = true;
   }
 
   /**
@@ -260,17 +264,39 @@ export class ViewDescRenderer {
     }
 
     const style = getComputedStyle(this.dom);
+    const height = parseFloat(style.height) || this.dom.getBoundingClientRect().height;
+    const marginTop = parseFloat(style.marginTop);
+    const marginBottom = parseFloat(style.marginBottom);
+
+    const isFirstChild = this.parent?.mode === LayoutMode.Horizontal || (this as unknown as ViewDesc) === this.parent?.children[0];
+
+    let offsetTopToParent = 0;
+
+    if (isFirstChild && this.parent?.layoutInfo.isDirty) {
+      const parentTop = (this.parent.dom as HTMLElement).getBoundingClientRect().top;
+      const top = this.dom.getBoundingClientRect().top;
+      offsetTopToParent = top - parentTop;
+    }
+
+    const changed =
+      this.layoutInfo.height !== height ||
+      this.layoutInfo.marginTop !== marginTop ||
+      this.layoutInfo.marginBottom !== marginBottom ||
+      this.layoutInfo.offsetTopToParent !== offsetTopToParent;
+
     this.layoutInfo = {
-      height: parseFloat(style.height) || this.dom.getBoundingClientRect().height,
-      marginTop: parseFloat(style.marginTop),
-      marginBottom: parseFloat(style.marginBottom),
-      // TODO: first node or prev sibling is no layout
-      offsetTopToParent: 0,
+      height,
+      marginTop,
+      marginBottom,
+      offsetTopToParent,
       isDirty: false,
     };
 
     // TODO: update parent layout
-    this.clearRects();
+    if (changed) {
+      this.parent?.clearRects();
+      this.parent?.markLayoutDirty();
+    }
   }
 
   /**
