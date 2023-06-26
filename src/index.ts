@@ -36,6 +36,8 @@ export class EditorView {
   focused = false
   /// Kludge used to work around a Chrome bug @internal
   trackWrites: DOMNode | null = null
+  /// @internal
+  trackSkipUpdate = false
   private mounted = false
   /// @internal
   markCursor: readonly Mark[] | null = null
@@ -218,11 +220,12 @@ export class EditorView {
           this.docView = docViewDesc(state.doc, outerDeco, innerDeco, this.dom, this)
         }
         const { viewport } = this._props;
-        viewport && this.docView.updateViewport(this, {
+        viewport && !this.trackSkipUpdate && this.docView.updateViewport(this, {
           buffer: viewport.getBuffer?.(),
           scrollTop: viewport.getScrollTop() - viewport.getOffsetToScroller(),
           scrollHeight: viewport.getScrollHeight(),
         });
+        this.trackSkipUpdate = false;
         if (chromeKludge && !this.trackWrites) forceSelUpdate = true
       }
       // Work around for an issue where an update arriving right between

@@ -443,11 +443,9 @@ export abstract class ViewDescRenderer {
     mounts.forEach(node => this.mountedNodes.add(node));
     unmounts.forEach(node => this.mountedNodes.delete(node));
 
-    const layouts = this.children.map(child => child.layoutInfo);
     const placeholderInfos = this.getPlaceholderInfos();
     placeholderInfos.forEach(info => {
-      const style = this.calculateStyle(layouts, info.range);
-      this.updatePlaceholderStyle(info, style);
+      this.updatePlaceholderStyle(info);
     });
     const arr = this.children.reduce<(ViewDescRenderer | IPlaceholderInfo)[]>((arr, child, index) => {
       if (this.mountedNodes.has(child)) {
@@ -461,7 +459,7 @@ export abstract class ViewDescRenderer {
       return arr;
     }, []);
 
-    renderDescs(this.contentDOM!, arr, {});
+    renderDescs(this.contentDOM!, arr, view);
 
     // return actually changed nodes
     return { mounts, unmounts };
@@ -479,28 +477,6 @@ export abstract class ViewDescRenderer {
   }
 
   abstract posBefore: number;
-
-  private calculateStyle(layouts: ILayoutInfo[], [start, end]: [number, number]) {
-    const slices = layouts.slice(start, end + 1);
-
-    return slices.reduce<IStyle>((style, layout, index) => {
-      if (this.mode === LayoutMode.Horizontal) {
-        return {
-          height: Math.max(style.height, layout.height),
-          marginTop: Math.max(style.marginTop, layout.marginTop),
-          marginBottom: Math.max(style.marginBottom, layout.marginBottom),
-        };
-      }
-
-      const { height, marginTop, marginBottom } = layout;
-      if (!index) style.marginTop = marginTop;
-
-      style.height += height + Math.max(style.marginBottom, marginTop);
-      style.marginBottom = marginBottom;
-
-      return style;
-    }, { height: 0, marginTop: 0, marginBottom: 0 });
-  }
 
   private getPlaceholderInfos() {
     const placeholderRanges = this.children.reduce<[number, number][]>((ranges, child, index) => {
@@ -531,12 +507,26 @@ export abstract class ViewDescRenderer {
     return infos;
   }
 
-  private updatePlaceholderStyle(info: PlaceholderInfo, style: IStyle) {
+  private updatePlaceholderStyle(info: PlaceholderInfo) {
+    const rects = this.getRects();
+    const { range: [start, end], dom } = info;
+    const style = this.mode === LayoutMode.Horizontal ?
+      rects.slice(start, end + 1).reduce((style, rect) => ({
+        height: Math.max(style.height, rect.height),
+        marginTop: Math.max(style.marginTop, rect.marginTop),
+        marginBottom: Math.max(style.marginBottom, rect.marginBottom),
+      }), { height: 0, marginTop: 0, marginBottom: 0 }) :
+      {
+        height: rects[end].bottom - rects[start].top,
+        marginTop: rects[start].marginTop,
+        marginBottom: rects[end].marginBottom,
+      };
+
     const { height, marginTop, marginBottom } = info.style;
     if (style.height !== height || style.marginTop !== marginTop || style.marginBottom !== marginBottom) {
-      info.dom.style.height = `${style.height}px`;
-      info.dom.style.marginTop = `${style.marginTop}px`;
-      info.dom.style.marginBottom = `${style.marginBottom}px`;
+      dom.style.height = `${style.height}px`;
+      dom.style.marginTop = `${style.marginTop}px`;
+      dom.style.marginBottom = `${style.marginBottom}px`;
     }
     info.style = style;
   }
@@ -1364,6 +1354,7 @@ class TextViewDesc extends NodeViewDesc {
     if (this.dirty == NODE_DIRTY || (this.dirty != NOT_DIRTY && !this.inParent()) ||
         !node.sameMarkup(this.node)) return false
     this.updateOuterDeco(outerDeco)
+    view.trackSkipUpdate = node.text === this.nodeDOM.nodeValue;
     if ((this.dirty != NOT_DIRTY || node.text != this.node.text) && node.text != this.nodeDOM.nodeValue) {
       this.nodeDOM.nodeValue = node.text!
       if (view.trackWrites == this.nodeDOM) view.trackWrites = null
@@ -1512,7 +1503,7 @@ class CustomNodeViewDesc extends NodeViewDesc {
 // Sync the content of the given DOM node with the nodes associated
 // with the given array of view descs, recursing into mark descs
 // because this should sync the subtree for a whole node at a time.
-function renderDescs(parentDOM: HTMLElement, descs: readonly (ViewDesc|PlaceholderInfo)[], view: EditorView) {
+function renderDescs(parentDOM: HTMLElement, descs: readonly (ViewDescRenderer|PlaceholderInfo)[], view?: EditorView) {
   let dom = parentDOM.firstChild, written = false
   for (let i = 0; i < descs.length; i++) {
     let desc = descs[i], childDOM = desc.dom
@@ -1530,7 +1521,7 @@ function renderDescs(parentDOM: HTMLElement, descs: readonly (ViewDesc|Placehold
     }
   }
   while (dom) { dom = rm(dom); written = true }
-  if (written && view.trackWrites == parentDOM) view.trackWrites = null
+  if (view && written && view.trackWrites == parentDOM) view.trackWrites = null
 }
 
 type OuterDecoLevel = {[attr: string]: string}
