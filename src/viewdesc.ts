@@ -5,6 +5,7 @@ import {domIndex, isEquivalentPosition, nodeSize, DOMNode} from "./dom"
 import * as browser from "./browser"
 import {Decoration, DecorationSource, WidgetConstructor, WidgetType, NodeType} from "./decoration"
 import {EditorView} from "./index"
+import schedule, { SchedulePriority } from "./schedule"
 
 declare global {
   interface Node { pmViewDesc?: ViewDesc }
@@ -149,7 +150,7 @@ class PlaceholderInfo {
   }
 }
 
-export class ViewDescRenderer {
+export abstract class ViewDescRenderer {
   placeholderPool: PlaceholderInfo[] = [];
 
   node!: Node | null
@@ -218,7 +219,7 @@ export class ViewDescRenderer {
       this.children.map((child) => {
         const { height, marginTop, marginBottom, offsetTopToParent } = child.layoutInfo;
         return {
-          top: 0, // TODO:
+          top: offsetTopToParent,
           left: 0,
           height,
           marginTop,
@@ -307,7 +308,7 @@ export class ViewDescRenderer {
    * 当前视口内的节点 {viewportNodes}
    * 当前 buffer 内的节点 {bufferNodes}
    */
-  private calculateViewport(viewport: IViewport) {
+  private calculateViewport(view: EditorView, viewport: IViewport) {
     const shouldMountNodes = new Set<ViewDescRenderer>();
     const bufferNodes = new Set<ViewDescRenderer>();
     const viewportNodes = new Set<ViewDescRenderer>();
@@ -344,7 +345,7 @@ export class ViewDescRenderer {
     }
 
     const unmounts = new Set(Array.from(this.mountedNodes).filter(node => {
-      return !shouldMountNodes.has(node) && !node.keep;
+      return !shouldMountNodes.has(node) && !node.shouldKeep(view);
     }));
     const mounts = new Set(Array.from(shouldMountNodes).filter(node => {
       return !this.mountedNodes.has(node);
@@ -364,7 +365,7 @@ export class ViewDescRenderer {
   updateViewport(view: EditorView, viewport: IViewport) {
     if (this.node?.isTextblock) return;
 
-    const { mounts, unmounts, viewportNodes, bufferNodes } = this.calculateViewport(viewport);
+    const { mounts, unmounts, viewportNodes, bufferNodes } = this.calculateViewport(view, viewport);
 
     // 先读 dom
     this.layoutChildren(unmounts);
@@ -376,14 +377,9 @@ export class ViewDescRenderer {
     this.updateDescendantViewport(view, mounts, viewportNodes, bufferNodes, viewport);
 
     // 最后写 dom
-    const { mounts: realMounts, unmounts: realUnmounts } = this.mountChildren(mounts, unmounts);
+    const { mounts: realMounts, unmounts: realUnmounts } = this.mountChildren(view, mounts, unmounts);
 
-    // TODO: force update layout
-    requestAnimationFrame(() => {
-      this.clearRects();
-      this.layoutChildren(mounts);
-    });
-
+    this.layoutMountsInSchedule(view, realMounts);
   }
 
   private ensureChildrenRendered(view: EditorView, mounts: Set<ViewDescRenderer>, parentPos?: number) {
@@ -418,7 +414,7 @@ export class ViewDescRenderer {
     const { scrollTop, scrollHeight, buffer } = viewport;
     const [first, ...rest] = bufferNodes.size ? bufferNodes : viewportNodes;
     const edgeNodes = new Set([first, rest[rest.length - 1]]);
-    const layouts = this.getRects().filter(({ node }) => mounts.has(node) || edgeNodes.has(node));
+    const layouts = this.getRects().filter(({ node }) => mounts.has(node) || edgeNodes.has(node) || this.mountedNodes.has(node));
     layouts.forEach(({ node, top, bottom, height }) => {
       // TODO: 改回高度
       const childViewportHeight = scrollTop <= top && bottom <= scrollTop + scrollHeight ?
@@ -436,12 +432,12 @@ export class ViewDescRenderer {
   /**
    * 对传入的 mounts 和 unmounts 节点进行挂载和卸载
    */
-  mountChildren(mounts?: Set<ViewDescRenderer>, unmounts?: Set<ViewDescRenderer>) {
+  mountChildren(view?: EditorView, mounts?: Set<ViewDescRenderer>, unmounts?: Set<ViewDescRenderer>) {
     // validate
     mounts = new Set(mounts && Array.from(mounts).filter(node => !this.mountedNodes.has(node)));
-    unmounts = new Set(unmounts && Array.from(unmounts).filter(node => !node.keep && this.mountedNodes.has(node)));
+    unmounts = new Set(unmounts && Array.from(unmounts).filter(node => !node.shouldKeep(view) && this.mountedNodes.has(node)));
 
-    if (!mounts.size && !unmounts.size) return;
+    if (!mounts.size && !unmounts.size) return { mounts, unmounts };
 
     // update mountedNodes
     mounts.forEach(node => this.mountedNodes.add(node));
@@ -474,7 +470,7 @@ export class ViewDescRenderer {
   ensureChildMounted(child: ViewDescRenderer) {
     if (this.isRoot && !this.mountedNodes.has(child)) {
       this.prerenderPool?.appendChild(child.dom);
-    } else this.mountChildren(new Set([child]));
+    } else this.mountChildren(undefined, new Set([child]));
     this.parent?.ensureChildMounted(this);
   }
 
@@ -482,9 +478,20 @@ export class ViewDescRenderer {
     this.prerenderPool?.remove();
   }
 
+  abstract posBefore: number;
+
   private calculateStyle(layouts: ILayoutInfo[], [start, end]: [number, number]) {
     const slices = layouts.slice(start, end + 1);
+
     return slices.reduce<IStyle>((style, layout, index) => {
+      if (this.mode === LayoutMode.Horizontal) {
+        return {
+          height: Math.max(style.height, layout.height),
+          marginTop: Math.max(style.marginTop, layout.marginTop),
+          marginBottom: Math.max(style.marginBottom, layout.marginBottom),
+        };
+      }
+
       const { height, marginTop, marginBottom } = layout;
       if (!index) style.marginTop = marginTop;
 
@@ -532,6 +539,27 @@ export class ViewDescRenderer {
       info.dom.style.marginBottom = `${style.marginBottom}px`;
     }
     info.style = style;
+  }
+
+  private layoutMountsInSchedule(view: EditorView, mounts: Set<ViewDescRenderer>) {
+    const needLayouts = Array.from(mounts).filter(node => node.layoutInfo.isDirty);
+    needLayouts.length && schedule.addTask({
+      priority: SchedulePriority.High,
+      callback: () => {
+        this.clearRects();
+        this.layoutChildren(mounts);
+      },
+    })
+  }
+
+  private shouldKeep(view?: EditorView) {
+    if (!this.parent) return false;
+    if (!view) return !!this.node!.type.spec.keep;
+
+    const { from, to } = view.state.selection;
+    const posStart = this.posBefore;
+
+    return (from <= posStart + this.node!.nodeSize && to >= posStart) || !!this.node!.type.spec.keep;
   }
 
   private initPrerenderPool() {
@@ -1219,7 +1247,6 @@ export class NodeViewDesc extends ViewDesc {
       // May have to protect focused DOM from being changed if a composition is active
       if (localComposition) this.protectLocalComposition(view, localComposition)
       this.node.isTextblock && this.isRendered && renderDescs(this.contentDOM!, this.children, view)
-      // this.isRoot && this.updateViewport(view, {})
       if (browser.ios) iosHacks(this.dom as HTMLElement)
     }
   }
@@ -1270,6 +1297,7 @@ export class NodeViewDesc extends ViewDesc {
     if (this.dirty == NODE_DIRTY ||
         !node.sameMarkup(this.node)) return false
     this.updateInner(node, outerDeco, innerDeco, view)
+    this.markLayoutDirty();
     return true
   }
 
@@ -1484,7 +1512,7 @@ class CustomNodeViewDesc extends NodeViewDesc {
 // Sync the content of the given DOM node with the nodes associated
 // with the given array of view descs, recursing into mark descs
 // because this should sync the subtree for a whole node at a time.
-function renderDescs(parentDOM: HTMLElement, descs: readonly ViewDesc[], view: EditorView) {
+function renderDescs(parentDOM: HTMLElement, descs: readonly (ViewDesc|PlaceholderInfo)[], view: EditorView) {
   let dom = parentDOM.firstChild, written = false
   for (let i = 0; i < descs.length; i++) {
     let desc = descs[i], childDOM = desc.dom
