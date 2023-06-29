@@ -674,11 +674,7 @@ export abstract class ViewDescRenderer {
   }
 
   private initPrerenderPool() {
-    const pool = this.dom.parentElement?.querySelector<HTMLDivElement>('.prerender-pool');
-    if (pool) {
-      this.prerenderPool = pool;
-      return;
-    }
+    if (!this.dom.parentElement) return;
 
     this.prerenderPool = document.createElement('div');
     this.prerenderPool.className = (this.dom as HTMLElement).className + ' prerender-pool';
@@ -688,7 +684,9 @@ export abstract class ViewDescRenderer {
       top: -99999px;
       left: -99999px;
     `;
-    this.dom.parentElement?.appendChild(this.prerenderPool);
+
+    this.dom.parentElement.style.position = 'relative';
+    this.dom.parentElement.appendChild(this.prerenderPool);
   }
 
   private layoutChildren(children: Set<ViewDescRenderer>) {
