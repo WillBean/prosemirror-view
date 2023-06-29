@@ -4,11 +4,13 @@ export enum SchedulePriority {
 }
 
 export interface IScheduleTask {
+  id?: number,
   priority: SchedulePriority;
   callback(): void;
 }
 
 export class Schedule {
+  private count = 0;
   private lowQueen: IScheduleTask[] = [];
   private highQueen: IScheduleTask[] = [];
   private scheduling = false;
@@ -19,8 +21,21 @@ export class Schedule {
     } else {
       this.highQueen.push(task);
     }
-
+    task.id = ++this.count;
     this.start();
+
+    return this.count;
+  }
+
+  cancelTask(id: number) {
+    this.cancel('lowQueen', id);
+    this.cancel('highQueen', id);
+  }
+
+  private cancel(queen: 'lowQueen' | 'highQueen', id: number) {
+    const index = this[queen].findIndex(task => task.id === id);
+    if (index === -1) return;
+    this[queen].splice(index, 1);
   }
 
   private start() {

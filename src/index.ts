@@ -3,7 +3,7 @@ import {Slice, ResolvedPos, DOMParser, DOMSerializer, Node, Mark} from "prosemir
 
 import {scrollRectIntoView, posAtCoords, coordsAtPos, endOfTextblock, storeScrollPos,
         resetScrollPos, focusPreventScroll} from "./domcoords"
-import {docViewDesc, ViewDesc, NodeView, NodeViewDesc} from "./viewdesc"
+import {docViewDesc, ViewDesc, NodeView, NodeViewDesc, WalkDirection, WalkStrategy} from "./viewdesc"
 import {initInput, destroyInput, dispatchEvent, ensureListeners, clearComposition, InputState, doPaste} from "./input"
 import {selectionToDOM, anchorInRightPlace, syncNodeSelection} from "./selection"
 import {Decoration, viewDecorations, DecorationSource} from "./decoration"
@@ -18,6 +18,7 @@ export {NodeView} from "./viewdesc"
 // Exported for testing
 import {serializeForClipboard, parseFromClipboard} from "./clipboard"
 import {endComposition} from "./input"
+import schedule, { SchedulePriority } from "./schedule"
 /// @internal
 export const __serializeForClipboard = serializeForClipboard
 /// @internal
@@ -62,6 +63,8 @@ export class EditorView {
 
   /// The view's current [state](#state.EditorState).
   public state: EditorState
+
+  private renderTaskId: number | null = null;
 
   /// Create a view. `place` may be a DOM node that the editor should
   /// be appended to, a function that will place it into the document,
@@ -225,6 +228,7 @@ export class EditorView {
           scrollTop: viewport.getScrollTop() - viewport.getOffsetToScroller(),
           scrollHeight: viewport.getScrollHeight(),
         });
+        this.startIdleRenderTask();
         this.trackSkipUpdate = false;
         if (chromeKludge && !this.trackWrites) forceSelUpdate = true
       }
@@ -265,6 +269,66 @@ export class EditorView {
     } else {
       scrollRectIntoView(this, this.coordsAtPos(this.state.selection.head, 1), startDOM)
     }
+  }
+
+  private startIdleRenderTask() {
+    if (this.renderTaskId !== null) schedule.cancelTask(this.renderTaskId);
+
+    this.renderTaskId = schedule.addTask({
+      priority: SchedulePriority.Low,
+      callback: () => {
+        if (this.isDestroyed) return;
+
+        const [first, ...rest] = this.docView.bufferNodes.size ? this.docView.bufferNodes : this.docView.viewportNodes;
+        const last = rest[rest.length - 1];
+
+        const render = (node) => {
+          if (node.isRendered) return false;
+          node.parent!.ensureChildrenRendered(this, new Set([node]));
+          return true;
+        };
+
+        const upwardRendered = this.docView.walk(WalkDirection.Up, WalkStrategy.Pre, render, this.docView.children.indexOf(first));
+        const downwardRendered = !upwardRendered && this.docView.walk(WalkDirection.Down, WalkStrategy.Pre, render, this.docView.children.indexOf(last));
+
+        this.renderTaskId = null;
+
+        if (upwardRendered || downwardRendered) {
+          this.startIdleRenderTask();
+        } else {
+          this.startIdleLayoutTask();
+        }
+      },
+    });
+  }
+
+  private startIdleLayoutTask() {
+    if (this.renderTaskId !== null) schedule.cancelTask(this.renderTaskId);
+
+    this.renderTaskId = schedule.addTask({
+      priority: SchedulePriority.Low,
+      callback: () => {
+        if (this.isDestroyed) return;
+
+        const [first, ...rest] = this.docView.bufferNodes.size ? this.docView.bufferNodes : this.docView.viewportNodes;
+        const last = rest[rest.length - 1];
+
+        const render = (node) => {
+          if (!node.node || node.node.isInline || !node.layoutInfo.isDirty) return false;
+          node.layout(this, new Set([node]));
+          return true;
+        };
+
+        const upwardLayouted = this.docView.walk(WalkDirection.Up, WalkStrategy.Post, render, this.docView.children.indexOf(first));
+        // const downwardLayouted = !upwardLayouted && this.docView.walk(WalkDirection.Down, WalkStrategy.Post, render, this.docView.children.indexOf(last));
+
+        this.renderTaskId = null;
+
+        if (upwardLayouted) {
+          this.startIdleLayoutTask();
+        }
+      },
+    });
   }
 
   private destroyPluginViews() {

@@ -134,6 +134,18 @@ enum LayoutMode {
   Horizontal = 'horizontal',
 };
 
+export enum WalkDirection {
+  Up = 'Up',
+  Down = 'Down',
+};
+
+export enum WalkStrategy {
+  Pre = 'preOrder',
+  Post = 'postOrder',
+};
+
+type IWalkCondition = (node: ViewDescRenderer) => boolean;
+
 class PlaceholderInfo {
   range: [number, number];
   dom: HTMLDivElement;
@@ -159,6 +171,16 @@ export abstract class ViewDescRenderer {
    * 当前所有已经挂载的节点列表
    */
   mountedNodes = new Set<ViewDescRenderer>();
+
+  /**
+   * 当前处于视口外 buffer 内的节点列表
+   */
+  bufferNodes = new Set<ViewDescRenderer>();
+
+  /**
+   * 当前处于视口内的节点列表
+   */
+  viewportNodes = new Set<ViewDescRenderer>();
 
   /**
    * 该节点是否保留在 DOM 不卸载
@@ -194,6 +216,8 @@ export abstract class ViewDescRenderer {
   protected prerenderPool?: HTMLElement;
 
   private rects: IRect[] | null = null;
+
+  abstract posBefore: number;
 
   constructor(
     public parent: ViewDesc | undefined,
@@ -252,6 +276,7 @@ export abstract class ViewDescRenderer {
   }
 
   markLayoutDirty() {
+    this.clearRects();
     this.layoutInfo.isDirty = true;
   }
 
@@ -271,19 +296,19 @@ export abstract class ViewDescRenderer {
 
     const isFirstChild = this.parent?.mode === LayoutMode.Horizontal || (this as unknown as ViewDesc) === this.parent?.children[0];
 
-    let offsetTopToParent = 0;
+    let offsetTopToParent = this.layoutInfo.offsetTopToParent;
 
-    if (isFirstChild && this.parent?.layoutInfo.isDirty) {
+    if (isFirstChild && this.parent?.layoutInfo.isDirty && this.parent.mountedNodes.has(this)) {
       const parentTop = (this.parent.dom as HTMLElement).getBoundingClientRect().top;
       const top = this.dom.getBoundingClientRect().top;
       offsetTopToParent = top - parentTop;
     }
 
-    const changed =
-      this.layoutInfo.height !== height ||
-      this.layoutInfo.marginTop !== marginTop ||
-      this.layoutInfo.marginBottom !== marginBottom ||
-      this.layoutInfo.offsetTopToParent !== offsetTopToParent;
+    const deltas =
+      [this.layoutInfo.height - height,
+      this.layoutInfo.marginTop - marginTop,
+      this.layoutInfo.marginBottom - marginBottom,
+      this.layoutInfo.offsetTopToParent - offsetTopToParent];
 
     this.layoutInfo = {
       height,
@@ -293,11 +318,36 @@ export abstract class ViewDescRenderer {
       isDirty: false,
     };
 
-    // TODO: update parent layout
-    if (changed) {
+    // TODO: 算的有问题
+    if (deltas.some(delta => !delta)) {
+      // this.updateParentLayout(deltas);
       this.parent?.clearRects();
       this.parent?.markLayoutDirty();
     }
+  }
+
+  private updateParentLayout([dtHeight, dtMarginTop = 0, dtMarginBottom = 0]: number[]) {
+    if (!this.parent || this.parent.isRoot) return this.parent?.clearRects();
+
+    const index = this.parent.children.indexOf(this);
+
+    if (index === -1) throw new Error(`Child doesn't exist on parent: ${this}`);
+
+    const prevSibling = this.parent.children[index - 1];
+    const nextSibling = this.parent.children[index + 1];
+    const { marginBottom, marginTop } = this.layoutInfo;
+
+    dtMarginTop = !nextSibling ? dtMarginTop :
+      marginBottom > nextSibling.layoutInfo.marginTop ? marginBottom - nextSibling.layoutInfo.marginTop : 0;
+    dtMarginBottom = !prevSibling ? dtMarginBottom :
+    marginTop > prevSibling.layoutInfo.marginBottom ? marginTop - prevSibling.layoutInfo.marginBottom : 0;
+
+    const delta = dtHeight + dtMarginTop + dtMarginBottom;
+    this.parent.layoutInfo.height += delta;
+    this.parent?.clearRects();
+    this.parent?.markLayoutDirty();
+
+    this.parent.updateParentLayout([delta]);
   }
 
   /**
@@ -345,13 +395,34 @@ export abstract class ViewDescRenderer {
     }
 
     const unmounts = new Set(Array.from(this.mountedNodes).filter(node => {
-      return !shouldMountNodes.has(node) && !node.shouldKeep(view);
+      return !shouldMountNodes.has(node);
     }));
     const mounts = new Set(Array.from(shouldMountNodes).filter(node => {
       return !this.mountedNodes.has(node);
     }));
 
     return { mounts, unmounts, viewportNodes, bufferNodes };
+  }
+
+  walk(
+    direction: WalkDirection,
+    strategy: WalkStrategy,
+    condition: IWalkCondition,
+    start = (direction === WalkDirection.Down ? 0 : this.children.length - 1)
+  ) {
+    let index = start;
+    while (index >= 0 && index <= this.children.length - 1) {
+      const node = this.children[index];
+
+      if (strategy === WalkStrategy.Pre) {
+        if (condition(node) || node.walk(direction, strategy, condition)) return true;
+      } else {
+        if (node.walk(direction, strategy, condition) || condition(node)) return true;
+      }
+
+      direction === WalkDirection.Down ? index++ : index--;
+    }
+    return false;
   }
 
   /**
@@ -367,6 +438,9 @@ export abstract class ViewDescRenderer {
 
     const { mounts, unmounts, viewportNodes, bufferNodes } = this.calculateViewport(view, viewport);
 
+    this.bufferNodes = bufferNodes;
+    this.viewportNodes = viewportNodes;
+
     // 先读 dom
     this.layoutChildren(unmounts);
 
@@ -380,10 +454,12 @@ export abstract class ViewDescRenderer {
     const { mounts: realMounts, unmounts: realUnmounts } = this.mountChildren(view, mounts, unmounts);
 
     this.layoutMountsInSchedule(view, realMounts);
+
   }
 
-  private ensureChildrenRendered(view: EditorView, mounts: Set<ViewDescRenderer>, parentPos?: number) {
-    if (!Array.from(mounts).find(child => !child.isRendered)) return;
+  /// @internal
+  ensureChildrenRendered(view: EditorView, mounts: Set<ViewDescRenderer>, parentPos?: number) {
+    if (!Array.from(mounts).find(child => child instanceof MarkViewDesc || !child.isRendered)) return;
     const pos = parentPos ?? (this instanceof NodeViewDesc && this.parent?.posBeforeChild(this) || 0);
     return this.children.reduce((pos, child, index) => {
       if (child instanceof MarkViewDesc) return child.ensureChildrenRendered(view, new Set(child.children), pos)
@@ -393,14 +469,20 @@ export abstract class ViewDescRenderer {
       rendered.children = child.children;
       child.children.forEach(node => node.parent = rendered);
       this.children.splice(index, 1, rendered);
+
+      this.viewportNodes.delete(child);
+      this.viewportNodes.add(rendered);
+
       if (rendered.node.isTextblock) {
-        rendered.ensureChildrenRendered(view, new Set(rendered.children), pos);
-        // rendered.updateChildren(view, pos);
+        // rendered.ensureChildrenRendered(view, new Set(rendered.children), pos);
+        rendered.updateChildren(view, pos, false);
         renderDescs(rendered.contentDOM!, rendered.children, view)
       }
 
       mounts.delete(child);
       mounts.add(rendered);
+
+      rendered.parent!.clearRects();
 
       return pos + (child.node?.nodeSize || 0);
     }, pos + 1);
@@ -467,7 +549,16 @@ export abstract class ViewDescRenderer {
 
   ensureChildMounted(child: ViewDescRenderer) {
     if (this.isRoot && !this.mountedNodes.has(child)) {
-      this.prerenderPool?.appendChild(child.dom);
+      this.prerenderPool!.appendChild(child.dom);
+      schedule.addTask({
+        priority: SchedulePriority.Low,
+        callback: () => {
+          this.prerenderPool?.childNodes.forEach((child) => {
+            const found = child.pmViewDesc?.walk(WalkDirection.Down, WalkStrategy.Pre, (node) => !node.isRendered);
+            if (!found) child.remove();
+          });
+        }
+      })
     } else this.mountChildren(undefined, new Set([child]));
     this.parent?.ensureChildMounted(this);
   }
@@ -476,7 +567,21 @@ export abstract class ViewDescRenderer {
     this.prerenderPool?.remove();
   }
 
-  abstract posBefore: number;
+  protected getSelectedTarget(node: DOMNode, offset: number) {
+    if (node.isConnected) return { node, offset };
+
+    let root = node.pmViewDesc;
+
+    while (root?.parent && !root.parent.isRoot) {
+      root = root.parent;
+    }
+
+    if (!root) return { node, offset };
+
+    const index = root.parent!.children.indexOf(root);
+    const info = root.parent!.usedPlaceholder.find(({ range: [start, end] }) => start <= index && index <= end );
+    return { node: info.dom, offset: 0 };
+  }
 
   private getPlaceholderInfos() {
     const placeholderRanges = this.children.reduce<[number, number][]>((ranges, child, index) => {
@@ -549,7 +654,7 @@ export abstract class ViewDescRenderer {
     const { from, to } = view.state.selection;
     const posStart = this.posBefore;
 
-    return (from <= posStart + this.node!.nodeSize && to >= posStart) || !!this.node!.type.spec.keep;
+    return !!this.node!.type.spec.keep;
   }
 
   private initPrerenderPool() {
@@ -901,10 +1006,13 @@ export class ViewDesc extends ViewDescRenderer {
     // browsers support it yet.
     let domSelExtended = false
     if ((domSel.extend || anchor == head) && !brKludge) {
-      domSel.collapse(anchorDOM.node, anchorDOM.offset)
+      const { node, offset } = anchorDOM.node.pmViewDesc!.getSelectedTarget(anchorDOM.node, anchorDOM.offset);
+      domSel.collapse(node, offset)
       try {
-        if (anchor != head)
-          domSel.extend(headDOM.node, headDOM.offset)
+        if (anchor != head) {
+          const { node, offset } = headDOM.node.pmViewDesc!.getSelectedTarget(headDOM.node, headDOM.offset);
+          domSel.extend(node, offset)
+        }
         domSelExtended = true
       } catch (_) {
         // In some cases with Chrome the selection is empty after calling
@@ -1115,7 +1223,8 @@ export class NodeViewDesc extends ViewDesc {
   // never need.)
   static create(parent: ViewDesc | undefined, node: Node, outerDeco: readonly Decoration[],
                 innerDeco: DecorationSource, view: EditorView, pos: number, fake = false) {
-    if (fake && !getParentNodeViewDesc(parent)?.isRendered) {
+    const parentNodeViewDesc = getParentNodeViewDesc(parent);
+    if (fake && (parentNodeViewDesc?.isRoot || !parentNodeViewDesc?.isRendered)) {
       return new FakeNodeViewDesc(parent, node, outerDeco, innerDeco, view, pos + 1)
     }
 
@@ -1193,7 +1302,7 @@ export class NodeViewDesc extends ViewDesc {
   // decorations, possibly introducing nesting for marks. Then, in a
   // separate step, syncs the DOM inside `this.contentDOM` to
   // `this.children`.
-  updateChildren(view: EditorView, pos: number) {
+  updateChildren(view: EditorView, pos: number, fake = true) {
     let inline = this.node.inlineContent, off = pos
     let composition = view.composing ? this.localCompositionInfo(view, pos) : null
     let localComposition = composition && composition.pos > -1 ? composition : null
@@ -1212,7 +1321,7 @@ export class NodeViewDesc extends ViewDesc {
       updater.syncToMarks(child.marks, inline, view)
       // Try several strategies for drawing this node
       let compIndex
-      if (updater.findNodeMatch(child, outerDeco, innerDeco, i)) {
+      if (fake && updater.findNodeMatch(child, outerDeco, innerDeco, i)) {
         // Found precise match with existing node view
       } else if (compositionInChild && view.state.selection.from > off &&
                  view.state.selection.to < off + child.nodeSize &&
@@ -1223,7 +1332,7 @@ export class NodeViewDesc extends ViewDesc {
         // Could update an existing node to reflect this node
       } else {
         // Add it as a new view
-        updater.addNode(child, outerDeco, innerDeco, view, off)
+        updater.addNode(child, outerDeco, innerDeco, view, off, fake)
       }
       off += child.nodeSize
     })
@@ -1507,7 +1616,7 @@ function renderDescs(parentDOM: HTMLElement, descs: readonly (ViewDescRenderer|P
   let dom = parentDOM.firstChild, written = false
   for (let i = 0; i < descs.length; i++) {
     let desc = descs[i], childDOM = desc.dom
-    if (childDOM.parentNode == parentDOM) {
+    if (dom && childDOM.parentNode == parentDOM) {
       while (childDOM != dom) { dom = rm(dom!); written = true }
       dom = dom.nextSibling
     } else {
@@ -1805,8 +1914,8 @@ class ViewTreeUpdater {
   }
 
   // Insert the node as a newly created node desc.
-  addNode(node: Node, outerDeco: readonly Decoration[], innerDeco: DecorationSource, view: EditorView, pos: number) {
-    let desc = NodeViewDesc.create(this.top, node, outerDeco, innerDeco, view, pos, true) // fake
+  addNode(node: Node, outerDeco: readonly Decoration[], innerDeco: DecorationSource, view: EditorView, pos: number, fake: boolean) {
+    let desc = NodeViewDesc.create(this.top, node, outerDeco, innerDeco, view, pos, fake)
     if (desc.contentDOM) desc.updateChildren(view, pos + 1)
     this.top.children.splice(this.index++, 0, desc)
     this.changed = true
