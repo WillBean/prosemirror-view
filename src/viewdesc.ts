@@ -494,9 +494,9 @@ export abstract class ViewDescRenderer {
    */
   private updateDescendantViewport(view: EditorView, mounts: Set<ViewDescRenderer>, viewportNodes: Set<ViewDescRenderer>, bufferNodes: Set<ViewDescRenderer>, viewport: IViewport) {
     const { scrollTop, scrollHeight, buffer } = viewport;
-    const [first, ...rest] = bufferNodes.size ? bufferNodes : viewportNodes;
-    const edgeNodes = new Set([first, rest[rest.length - 1]]);
-    const layouts = this.getRects().filter(({ node }) => mounts.has(node) || edgeNodes.has(node) || this.mountedNodes.has(node));
+    // const [first, ...rest] = bufferNodes.size ? bufferNodes : viewportNodes;
+    // const edgeNodes = new Set([first, rest[rest.length - 1]]);
+    const layouts = this.getRects().filter(({ node }) => mounts.has(node) || this.mountedNodes.has(node));
     layouts.forEach(({ node, top, bottom, height }) => {
       // TODO: 改回高度
       const childViewportHeight = scrollTop <= top && bottom <= scrollTop + scrollHeight ?
@@ -649,10 +649,26 @@ export abstract class ViewDescRenderer {
 
   private shouldKeep(view?: EditorView) {
     if (!this.parent) return false;
-    if (!view) return !!this.node!.type.spec.keep;
 
-    const { from, to } = view.state.selection;
-    const posStart = this.posBefore;
+    const selection = getSelection();
+    if (!selection || !selection.anchorNode || !selection.focusNode) return !!this.node!.type.spec.keep;
+
+    // TODO: 有时并不准确
+    const startMark = this.dom.compareDocumentPosition(selection.anchorNode);
+    const endMark = this.dom.compareDocumentPosition(selection.focusNode);
+
+    if (
+      startMark & window.Node.DOCUMENT_POSITION_CONTAINS ||
+      startMark & window.Node.DOCUMENT_POSITION_CONTAINED_BY ||
+      endMark & window.Node.DOCUMENT_POSITION_CONTAINED_BY ||
+      endMark & window.Node.DOCUMENT_POSITION_CONTAINED_BY ||
+      (
+        startMark & window.Node.DOCUMENT_POSITION_PRECEDING &&
+        endMark & window.Node.DOCUMENT_POSITION_FOLLOWING
+      )
+    ) {
+      return true;
+    }
 
     return !!this.node!.type.spec.keep;
   }
