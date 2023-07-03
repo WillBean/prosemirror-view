@@ -389,7 +389,7 @@ export abstract class ViewDescRenderer {
       }
 
       // 提前结束循环，看是否需要改成二分法计算
-      if (!isHorizontal && scrollBottom < top) {
+      if (!isHorizontal && scrollBottom + buffer < top) {
         break;
       }
     }
@@ -423,6 +423,35 @@ export abstract class ViewDescRenderer {
       direction === WalkDirection.Down ? index++ : index--;
     }
     return false;
+  }
+
+  /**
+   * 获取最深的首个视口内的节点
+   */
+  getInnerViewportNode(): ViewDescRenderer | undefined {
+    if (this.node?.isTextblock) {
+      return this;
+    } else {
+      const [first] = this.viewportNodes;
+      return first?.getInnerViewportNode() || first || this;
+    }
+  }
+
+  /**
+   * 获取节点到 Root 的 rect
+   */
+  getOffsetTopToRoot() {
+    let top = 0;
+    let child: ViewDescRenderer | undefined = this;
+    let parent = this.parent;
+    while (parent) {
+      const index = parent.children.indexOf(child);
+      top += parent.getRects()[index].top;
+
+      child = this.parent;
+      parent = this.parent?.parent;
+    }
+    return top;
   }
 
   /**
@@ -470,9 +499,6 @@ export abstract class ViewDescRenderer {
       child.children.forEach(node => node.parent = rendered);
       this.children.splice(index, 1, rendered);
 
-      this.viewportNodes.delete(child);
-      this.viewportNodes.add(rendered);
-
       if (rendered.node.isTextblock) {
         // rendered.ensureChildrenRendered(view, new Set(rendered.children), pos);
         rendered.updateChildren(view, pos, false);
@@ -519,13 +545,14 @@ export abstract class ViewDescRenderer {
     mounts = new Set(mounts && Array.from(mounts).filter(node => !this.mountedNodes.has(node)));
     unmounts = new Set(unmounts && Array.from(unmounts).filter(node => !node.shouldKeep(view) && this.mountedNodes.has(node)));
 
-    if (!mounts.size && !unmounts.size) return { mounts, unmounts };
-
     // update mountedNodes
     mounts.forEach(node => this.mountedNodes.add(node));
     unmounts.forEach(node => this.mountedNodes.delete(node));
 
     const placeholderInfos = this.getPlaceholderInfos();
+
+    if (!mounts.size && !unmounts.size && !placeholderInfos.length) return { mounts, unmounts };
+
     placeholderInfos.forEach(info => {
       this.updatePlaceholderStyle(info);
     });
@@ -637,12 +664,12 @@ export abstract class ViewDescRenderer {
   }
 
   private layoutMountsInSchedule(view: EditorView, mounts: Set<ViewDescRenderer>) {
-    const needLayouts = Array.from(mounts).filter(node => node.layoutInfo.isDirty);
+    const needLayouts = Array.from(this.mountedNodes).filter(node => node.layoutInfo.isDirty);
     needLayouts.length && schedule.addTask({
       priority: SchedulePriority.High,
       callback: () => {
         this.clearRects();
-        this.layoutChildren(mounts);
+        this.layoutChildren(new Set(needLayouts));
       },
     })
   }
@@ -651,7 +678,7 @@ export abstract class ViewDescRenderer {
     if (!this.parent) return false;
 
     const selection = getSelection();
-    if (!selection || !selection.anchorNode || !selection.focusNode) return !!this.node!.type.spec.keep;
+    if (!selection || !selection.anchorNode || !selection.focusNode) return !!this.node!.type.spec.keep || this.keep;
 
     // TODO: 有时并不准确
     const startMark = this.dom.compareDocumentPosition(selection.anchorNode);
@@ -670,7 +697,7 @@ export abstract class ViewDescRenderer {
       return true;
     }
 
-    return !!this.node!.type.spec.keep;
+    return !!this.node!.type.spec.keep || this.keep;
   }
 
   private initPrerenderPool() {
@@ -1542,7 +1569,19 @@ class FakeNodeViewDesc extends NodeViewDesc {
   }
 
   render(view: EditorView, pos: number) {
-    return NodeViewDesc.create(this.parent, this.node, this.outerDeco, this.innerDeco, view, pos)
+    const node = NodeViewDesc.create(this.parent, this.node, this.outerDeco, this.innerDeco, view, pos);
+
+    if (this.parent?.viewportNodes.has(this)) {
+      this.parent.viewportNodes.add(node);
+      this.parent.viewportNodes.delete(this);
+    }
+
+    if (this.parent?.bufferNodes.has(this)) {
+      this.parent.bufferNodes.add(node);
+      this.parent.bufferNodes.delete(this);
+    }
+
+    return node;
   }
 
   update(node: Node, outerDeco: readonly Decoration[], innerDeco: DecorationSource, view: EditorView): boolean {

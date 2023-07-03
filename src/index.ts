@@ -157,11 +157,7 @@ export class EditorView {
   onScroll() {
     this.domObserver.stop()
     const { viewport } = this._props;
-    viewport && this.docView.updateViewport(this, {
-      buffer: viewport.getBuffer?.(),
-      scrollTop: viewport.getScrollTop() - viewport.getOffsetToScroller(),
-      scrollHeight: viewport.getScrollHeight(),
-    });
+    viewport && this.docView.updateViewport(this, this.getViewport()!);
     this.domObserver.start()
   }
 
@@ -212,21 +208,20 @@ export class EditorView {
       let forceSelUpdate = updateDoc && (browser.ie || browser.chrome) && !this.composing &&
           !prev.selection.empty && !state.selection.empty && selectionContextChanged(prev.selection, state.selection)
       if (updateDoc) {
-        // If the node that the selection points into is written to,
-        // Chrome sometimes starts misreporting the selection, so this
-        // tracks that and forces a selection reset when our update
-        // did write to the node.
         let chromeKludge = browser.chrome ? (this.trackWrites = this.domSelectionRange().focusNode) : null
-        if (redraw || !this.docView.update(state.doc, outerDeco, innerDeco, this)) {
-          this.docView.updateOuterDeco([])
-          this.docView.destroy()
-          this.docView = docViewDesc(state.doc, outerDeco, innerDeco, this.dom, this)
-        }
-        const { viewport } = this._props;
-        viewport && !this.trackSkipUpdate && this.docView.updateViewport(this, {
-          buffer: viewport.getBuffer?.(),
-          scrollTop: viewport.getScrollTop() - viewport.getOffsetToScroller(),
-          scrollHeight: viewport.getScrollHeight(),
+        this.lockViewport(() => {
+          // If the node that the selection points into is written to,
+          // Chrome sometimes starts misreporting the selection, so this
+          // tracks that and forces a selection reset when our update
+          // did write to the node.
+          if (redraw || !this.docView.update(state.doc, outerDeco, innerDeco, this)) {
+            this.docView.updateOuterDeco([])
+            this.docView.destroy()
+            this.docView = docViewDesc(state.doc, outerDeco, innerDeco, this.dom, this)
+          }
+          const { viewport } = this._props;
+        // TODO: 只有变更才调用
+          viewport && !this.trackSkipUpdate && this.docView.updateViewport(this, this.getViewport()!);
         });
         this.startIdleRenderTask();
         this.trackSkipUpdate = false;
@@ -271,6 +266,18 @@ export class EditorView {
     }
   }
 
+  private getViewport() {
+    const { viewport } = this._props;
+
+    if (!viewport) return;
+
+    return {
+      buffer: viewport.getBuffer?.(),
+      scrollTop: viewport.getScrollTop() - viewport.getOffsetToScroller(),
+      scrollHeight: viewport.getScrollHeight(),
+    };
+  }
+
   private startIdleRenderTask() {
     if (this.renderTaskId !== null) schedule.cancelTask(this.renderTaskId);
 
@@ -310,12 +317,16 @@ export class EditorView {
       callback: () => {
         if (this.isDestroyed) return;
 
-        const [first, ...rest] = this.docView.bufferNodes.size ? this.docView.bufferNodes : this.docView.viewportNodes;
+        const [first, ...rest] = this.docView.viewportNodes;
         const last = rest[rest.length - 1];
 
         const render = (node) => {
           if (!node.node || node.node.isInline || !node.layoutInfo.isDirty) return false;
-          node.layout(this, new Set([node]));
+
+          this.lockViewport(() => {
+            node.layout(this, new Set([node]));
+            this.docView.updateViewport(this, this.getViewport()!);
+          });
           return true;
         };
 
@@ -329,6 +340,37 @@ export class EditorView {
         }
       },
     });
+  }
+
+  private lockViewport(fn: () => void) {
+    const node = this.docView.getInnerViewportNode();
+
+    if (!this._props.viewport || !node || !(node.dom instanceof HTMLElement)) return fn();
+
+    const top3 = node.dom.offsetTop;
+    let top = node.getOffsetTopToRoot();
+
+    // TODO: keep on dom
+    node.keep = true;
+
+    fn();
+
+    let afterTop: number;
+    // 如果 buffer 内存在变更，只能从 dom 上读取 offsetTop，因为此时还没有对节点重新 layout
+    if (Array.from(this.docView.bufferNodes).find(node => node.layoutInfo.isDirty)) {
+      top = Math.ceil(top);
+      afterTop = node.dom.offsetTop;
+    } else {
+      afterTop = node.getOffsetTopToRoot();
+    }
+    const delta3 = node.dom.offsetTop - top3;
+    const delta = afterTop - top;
+
+    node.keep = false;
+
+    console.warn(delta, '>>>>>>>>>', delta3)
+    const { viewport } = this._props;
+    delta && viewport.setScrollTop(viewport.getScrollTop() + delta);
   }
 
   private destroyPluginViews() {
@@ -869,6 +911,7 @@ export interface DirectEditorProps extends EditorProps {
 
   viewport?: {
     getBuffer?(): number;
+    setScrollTop(top: number): void;
     getScrollTop(): number;
     getScrollHeight(): number;
     getOffsetToScroller(): number;
