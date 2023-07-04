@@ -3,7 +3,7 @@ import {Slice, ResolvedPos, DOMParser, DOMSerializer, Node, Mark} from "prosemir
 
 import {scrollRectIntoView, posAtCoords, coordsAtPos, endOfTextblock, storeScrollPos,
         resetScrollPos, focusPreventScroll} from "./domcoords"
-import {docViewDesc, ViewDesc, NodeView, NodeViewDesc, WalkDirection, WalkStrategy} from "./viewdesc"
+import {docViewDesc, ViewDesc, NodeView, NodeViewDesc, WalkDirection, WalkStrategy, ViewDescRenderer} from "./viewdesc"
 import {initInput, destroyInput, dispatchEvent, ensureListeners, clearComposition, InputState, doPaste} from "./input"
 import {selectionToDOM, anchorInRightPlace, syncNodeSelection} from "./selection"
 import {Decoration, viewDecorations, DecorationSource} from "./decoration"
@@ -65,6 +65,10 @@ export class EditorView {
   public state: EditorState
 
   private renderTaskId: number | null = null;
+
+  private lastScrollTop = 0;
+
+  private upwardClean = true;
 
   /// Create a view. `place` may be a DOM node that the editor should
   /// be appended to, a function that will place it into the document,
@@ -155,10 +159,60 @@ export class EditorView {
   }
 
   onScroll() {
+    const viewport = this.getViewport();
+
+    if (!viewport) return;
+
     this.domObserver.stop()
-    const { viewport } = this._props;
-    viewport && this.docView.updateViewport(this, this.getViewport()!);
+
+    const shouldLock = this.forceLayoutUpwardNodes();
+
+    if (shouldLock) {
+      this.lockViewport(() => this.docView.updateViewport(this, viewport));
+    } else {
+      this.docView.updateViewport(this, viewport);
+    }
+
+    this.lastScrollTop = viewport.scrollTop;
     this.domObserver.start()
+  }
+
+  // 判断视口上方一定范围内是否存在 layout dirty 的节点，是则强制 layout 一次，避免向上滚动时视口跳动
+  private forceLayoutUpwardNodes() {
+    const viewport = this.getViewport();
+
+    if (!this._props.viewport?.getForceLayoutDistance || !viewport || this.upwardClean || viewport.scrollTop >= this.lastScrollTop) return false;
+
+    const rects = this.docView.getRects();
+    const [first] = this.docView.bufferNodes.size ? this.docView.bufferNodes : this.docView.viewportNodes;
+    const forceLayoutDistance = this._props.viewport.getForceLayoutDistance();
+
+    let index = this.docView.children.indexOf(first) - 1;
+    let rect = rects[index];
+
+    const dirtyNodes = new Set<ViewDescRenderer>();
+    while (index > 0 && rect?.top > viewport.scrollTop - forceLayoutDistance) {
+      rect.node.walk(WalkDirection.Down, WalkStrategy.Post, (node) => {
+        if (node.layoutInfo.isDirty) dirtyNodes.add(node);
+        return false;
+      });
+      rect = rects[--index];
+    }
+    const renderMap = Array.from(dirtyNodes).reverse()
+      .reduce<Map<ViewDescRenderer, Set<ViewDescRenderer>>>((map, node) => {
+        if (!node.parent) return map;
+        if (!map.has(node.parent)) map.set(node.parent, new Set());
+        map.get(node.parent)?.add(node);
+        return map;
+      }, new Map());
+
+    renderMap.forEach((children, parent) => {
+      parent.ensureChildrenRendered(this, children);
+      parent.mountChildren(this, children);
+    });
+    dirtyNodes.forEach(node => node.layout());
+
+    return !!dirtyNodes.size;
   }
 
   /// Update the editor's `state` prop, without touching any of the
@@ -295,12 +349,12 @@ export class EditorView {
           return true;
         };
 
-        const upwardRendered = this.docView.walk(WalkDirection.Up, WalkStrategy.Pre, render, this.docView.children.indexOf(first));
-        const downwardRendered = !upwardRendered && this.docView.walk(WalkDirection.Down, WalkStrategy.Pre, render, this.docView.children.indexOf(last));
+        const foundUpward = this.docView.walk(WalkDirection.Up, WalkStrategy.Pre, render, this.docView.children.indexOf(first));
+        const foundDownward = !foundUpward && this.docView.walk(WalkDirection.Down, WalkStrategy.Pre, render, this.docView.children.indexOf(last));
 
         this.renderTaskId = null;
 
-        if (upwardRendered || downwardRendered) {
+        if (foundUpward || foundDownward) {
           this.startIdleRenderTask();
         } else {
           this.startIdleLayoutTask();
@@ -330,12 +384,13 @@ export class EditorView {
           return true;
         };
 
-        const upwardLayouted = this.docView.walk(WalkDirection.Up, WalkStrategy.Post, render, this.docView.children.indexOf(first));
+        const foundDirty = this.docView.walk(WalkDirection.Up, WalkStrategy.Post, render, this.docView.children.indexOf(first));
         // const downwardLayouted = !upwardLayouted && this.docView.walk(WalkDirection.Down, WalkStrategy.Post, render, this.docView.children.indexOf(last));
 
         this.renderTaskId = null;
+        this.upwardClean = !foundDirty;
 
-        if (upwardLayouted) {
+        if (foundDirty) {
           this.startIdleLayoutTask();
         }
       },
@@ -915,5 +970,6 @@ export interface DirectEditorProps extends EditorProps {
     getScrollTop(): number;
     getScrollHeight(): number;
     getOffsetToScroller(): number;
+    getForceLayoutDistance?(): number;
   },
 }
