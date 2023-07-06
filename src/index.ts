@@ -359,6 +359,7 @@ export class EditorView {
         }
         target.scrollIntoView(options);
 
+        // TODO: 如果已经在视口内，不等待
         // smooth 模式下，如果在滚动触发前，target 的位置（offsetTop）发生变化，则滚动行为会被取消；若 1 帧后没有触发滚动，则再次 scroll
         setTimeout(() => {
           if (!this.isScrolling) scrollTo(target, options);
@@ -374,6 +375,27 @@ export class EditorView {
 
       scrollTo(targetDom, options);
     }
+  }
+
+  markLayoutDirty(pos: number) {
+    const desc = this.docView.descAt(pos);
+
+    if (!desc) return;
+
+    if (!desc.inBuffer()) {
+      desc.markLayoutDirty();
+      this.startIdleRenderTask();
+      return;
+    }
+
+    this.withoutMutationObserver(() => {
+      this.lockViewport(() => {
+        desc.layout();
+        this.docView.updateViewport(this, this.getViewport()!);
+      });
+    });
+
+    this.startIdleRenderTask();
   }
 
   private withoutMutationObserver(fn: () => void) {

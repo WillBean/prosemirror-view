@@ -287,6 +287,31 @@ export abstract class ViewDescRenderer {
   markLayoutDirty() {
     this.clearRects();
     this.layoutInfo.isDirty = true;
+
+    this.climb(node => {
+      node.clearRects();
+      node.layoutInfo.isDirty = true;
+      return false;
+    });
+  }
+
+  inBuffer() {
+    for (let parent = this.parent, child = this, buffer = false; parent; child = parent, parent = child.parent) {
+      if (child.node?.isInline || child instanceof MarkViewDesc) continue;
+      if (!buffer && !parent.bufferNodes.upward.has(child) && !parent.bufferNodes.downward.has(child)) return false;
+      buffer = true;
+      if (!parent.mountedNodes.has(child)) return false;
+    }
+    return true;
+  }
+
+  inViewport() {
+    for (let parent = this.parent, child = this; parent; child = parent, parent = child.parent) {
+      if (child.node?.isInline || child instanceof MarkViewDesc) continue;
+      if (!parent.viewportNodes.has(child)) return false;
+      if (parent.isRoot) return true;
+    }
+    return false;
   }
 
   /**
@@ -435,6 +460,13 @@ export abstract class ViewDescRenderer {
       }
 
       direction === WalkDirection.Down ? index++ : index--;
+    }
+    return false;
+  }
+
+  climb(fn: (node: ViewDescRenderer) => boolean) {
+    for (let node = this.parent; node; node = node.parent) {
+      if (fn(node)) return true;
     }
     return false;
   }
