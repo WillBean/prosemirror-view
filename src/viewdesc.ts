@@ -181,7 +181,10 @@ export abstract class ViewDescRenderer {
   /**
    * 当前处于视口外 buffer 内的节点列表
    */
-  bufferNodes = new Set<ViewDescRenderer>();
+  bufferNodes = {
+    upward: new Set<ViewDescRenderer>(),
+    downward: new Set<ViewDescRenderer>(),
+  }
 
   /**
    * 当前处于视口内的节点列表
@@ -366,7 +369,10 @@ export abstract class ViewDescRenderer {
    */
   private calculateViewport(view: EditorView, viewport: IViewport) {
     const shouldMountNodes = new Set<ViewDescRenderer>();
-    const bufferNodes = new Set<ViewDescRenderer>();
+    const bufferNodes = {
+      upward: new Set<ViewDescRenderer>(),
+      downward: new Set<ViewDescRenderer>(),
+    };
     const viewportNodes = new Set<ViewDescRenderer>();
 
     const { scrollTop, scrollHeight, buffer = 0 } = viewport;
@@ -389,8 +395,10 @@ export abstract class ViewDescRenderer {
           scrollBottom >= top
         ) {
           viewportNodes.add(node);
+        } else if (scrollTop > bottom) {
+          bufferNodes.upward.add(node);
         } else {
-          bufferNodes.add(node);
+          bufferNodes.downward.add(node);
         }
       }
 
@@ -508,7 +516,7 @@ export abstract class ViewDescRenderer {
     this.ensureChildrenRendered(view, mounts);
 
     // 再调用子节点的 update
-    this.updateDescendantViewport(view, mounts, viewportNodes, bufferNodes, viewport);
+    this.updateDescendantViewport(view, mounts, viewport);
 
     // 最后写 dom
     const { mounts: realMounts, unmounts: realUnmounts } = this.mountChildren(view, mounts, unmounts);
@@ -549,7 +557,7 @@ export abstract class ViewDescRenderer {
    * 为减少计算量，不对 unmount 的子节点再进行卸载
    * 仅对 mounts 和 this.mountedNodes 中处于视口边界的两个节点计算。
    */
-  private updateDescendantViewport(view: EditorView, mounts: Set<ViewDescRenderer>, viewportNodes: Set<ViewDescRenderer>, bufferNodes: Set<ViewDescRenderer>, viewport: IViewport) {
+  private updateDescendantViewport(view: EditorView, mounts: Set<ViewDescRenderer>, viewport: IViewport) {
     const { scrollTop, scrollHeight, buffer } = viewport;
     // const [first, ...rest] = bufferNodes.size ? bufferNodes : viewportNodes;
     // const edgeNodes = new Set([first, rest[rest.length - 1]]);
@@ -699,8 +707,9 @@ export abstract class ViewDescRenderer {
     needLayouts.length && schedule.addTask({
       priority: SchedulePriority.High,
       callback: () => {
+        const stillMounts = needLayouts.filter(node => node.dom.isConnected);
         this.clearRects();
-        this.layoutChildren(new Set(needLayouts));
+        this.layoutChildren(new Set(stillMounts));
       },
     })
   }
@@ -1078,11 +1087,11 @@ export class ViewDesc extends ViewDescRenderer {
     // browsers support it yet.
     let domSelExtended = false
     if ((domSel.extend || anchor == head) && !brKludge) {
-      const { node, offset } = anchorDOM.node.pmViewDesc!.getSelectedTarget(anchorDOM.node, anchorDOM.offset);
+      const { node, offset } = anchorDOM.node.pmViewDesc ? anchorDOM.node.pmViewDesc.getSelectedTarget(anchorDOM.node, anchorDOM.offset) : anchorDOM;
       domSel.collapse(node, offset)
       try {
         if (anchor != head) {
-          const { node, offset } = headDOM.node.pmViewDesc!.getSelectedTarget(headDOM.node, headDOM.offset);
+          const { node, offset } = headDOM.node.pmViewDesc ? headDOM.node.pmViewDesc.getSelectedTarget(headDOM.node, headDOM.offset) : headDOM;
           domSel.extend(node, offset)
         }
         domSelExtended = true
@@ -1149,6 +1158,14 @@ export class ViewDesc extends ViewDescRenderer {
   get ignoreForCoords() { return false }
 }
 
+const WIDGET_LAYOUT_INFO: ILayoutInfo = {
+  isDirty: false,
+  height: 0,
+  marginTop: 0,
+  marginBottom: 0,
+  offsetTopToParent: 0,
+};
+
 // A widget desc represents a widget decoration, which is a DOM node
 // drawn between the document nodes.
 class WidgetViewDesc extends ViewDesc {
@@ -1169,6 +1186,8 @@ class WidgetViewDesc extends ViewDesc {
     }
     super(parent, [], dom, null)
     this.widget = widget
+    this.keep = true
+    this.layoutInfo = WIDGET_LAYOUT_INFO;
     self = this
   }
 
@@ -1415,6 +1434,7 @@ export class NodeViewDesc extends ViewDesc {
 
     // Sync the DOM if anything changed
     if (updater.changed || this.dirty == CONTENT_DIRTY) {
+      this.markLayoutDirty();
       // May have to protect focused DOM from being changed if a composition is active
       if (localComposition) this.protectLocalComposition(view, localComposition)
       this.node.isTextblock && this.isRendered && renderDescs(this.contentDOM!, this.children, view)
@@ -1608,9 +1628,14 @@ class FakeNodeViewDesc extends NodeViewDesc {
       this.parent.viewportNodes.delete(this);
     }
 
-    if (this.parent?.bufferNodes.has(this)) {
-      this.parent.bufferNodes.add(node);
-      this.parent.bufferNodes.delete(this);
+    if (this.parent?.bufferNodes.upward.has(this)) {
+      this.parent.bufferNodes.upward.add(node);
+      this.parent.bufferNodes.upward.delete(this);
+    }
+
+    if (this.parent?.bufferNodes.downward.has(this)) {
+      this.parent.bufferNodes.downward.add(node);
+      this.parent.bufferNodes.downward.delete(this);
     }
 
     return node;

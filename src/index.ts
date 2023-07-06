@@ -201,7 +201,7 @@ export class EditorView {
     if (!this._props.viewport?.getForceLayoutDistance || !viewport || this.upwardClean || viewport.scrollTop >= this.lastScrollTop) return false;
 
     const rects = this.docView.getRects();
-    const [first] = this.docView.bufferNodes.size ? this.docView.bufferNodes : this.docView.viewportNodes;
+    const [first] = this.docView.bufferNodes.upward.size ? this.docView.bufferNodes.upward : this.docView.viewportNodes;
     const forceLayoutDistance = this._props.viewport.getForceLayoutDistance();
 
     let index = this.docView.children.indexOf(first) - 1;
@@ -348,7 +348,10 @@ export class EditorView {
     const viewport = this.getViewport()!;
     const top = target.getOffsetTopToRoot();
     viewport.scrollTop = top - viewport.scrollHeight / 2;
+
+    this.domObserver.stop();
     this.docView.updateViewport(this, viewport, { preventUnmount: true });
+    this.domObserver.start();
 
     const targetDom = pos === -1 ? dom : this.nodeDOM(pos);
 
@@ -358,7 +361,9 @@ export class EditorView {
 
         if (options?.offset && target instanceof HTMLElement) {
           options.block = 'start';
+          this.domObserver.stop();
           target.style.scrollMarginTop = options.offset + 'px';
+          this.domObserver.start();
         }
         target.scrollIntoView(options);
 
@@ -368,7 +373,9 @@ export class EditorView {
           else if (options?.offset && target instanceof HTMLElement) {
             // 若已经发生滚动，则 200ms 后，认为滚动停止
             setTimeout(() => {
+              this.domObserver.stop();
               target.style.scrollMarginTop = '';
+              this.domObserver.start();
               this.lockScroll = false;
             }, 200);
           }
@@ -399,7 +406,7 @@ export class EditorView {
       callback: () => {
         if (this.isDestroyed) return;
 
-        const [first, ...rest] = this.docView.bufferNodes.size ? this.docView.bufferNodes : this.docView.viewportNodes;
+        const [first, ...rest] = this.docView.bufferNodes.upward.size ? this.docView.bufferNodes.upward : this.docView.viewportNodes;
         const last = rest[rest.length - 1];
 
         const render = (node) => {
@@ -471,8 +478,8 @@ export class EditorView {
 
     let afterTop: number;
     // 如果 buffer 内存在变更，只能从 dom 上读取 offsetTop，因为此时还没有对节点重新 layout
-    if (Array.from(this.docView.bufferNodes).find(node => node.layoutInfo.isDirty)) {
-      top = Math.ceil(top);
+    if (Array.from(this.docView.bufferNodes.upward).find(node => node.layoutInfo.isDirty)) {
+      top = Math.round(top);
       afterTop = node.dom.offsetTop;
     } else {
       afterTop = node.getOffsetTopToRoot();
