@@ -137,11 +137,6 @@ export class EditorView {
     return !!this.scrollTimer;
   }
 
-  /**
-   *
-   */
-  getLayoutInfo(pos: number) {}
-
   /// Update the view's props. Will immediately cause an update to
   /// the DOM.
   update(props: DirectEditorProps) {
@@ -180,18 +175,17 @@ export class EditorView {
 
     if (this.lockScroll) return;
 
-    this.domObserver.stop()
+    this.withoutMutationObserver(() => {
+      const shouldLock = this.forceLayoutUpwardNodes();
 
-    const shouldLock = this.forceLayoutUpwardNodes();
+      if (shouldLock) {
+        this.lockViewport(() => this.docView.updateViewport(this, viewport));
+      } else {
+        this.docView.updateViewport(this, viewport);
+      }
 
-    if (shouldLock) {
-      this.lockViewport(() => this.docView.updateViewport(this, viewport));
-    } else {
-      this.docView.updateViewport(this, viewport);
-    }
-
-    this.lastScrollTop = viewport.scrollTop;
-    this.domObserver.start()
+      this.lastScrollTop = viewport.scrollTop;
+    });
   }
 
   // 判断视口上方一定范围内是否存在 layout dirty 的节点，是则强制 layout 一次，避免向上滚动时视口跳动
@@ -349,9 +343,9 @@ export class EditorView {
     const top = target.getOffsetTopToRoot();
     viewport.scrollTop = top - viewport.scrollHeight / 2;
 
-    this.domObserver.stop();
-    this.docView.updateViewport(this, viewport, { preventUnmount: true });
-    this.domObserver.start();
+    this.withoutMutationObserver(() => {
+      this.docView.updateViewport(this, viewport, { preventUnmount: true });
+    });
 
     const targetDom = pos === -1 ? dom : this.nodeDOM(pos);
 
@@ -361,9 +355,7 @@ export class EditorView {
 
         if (options?.offset && target instanceof HTMLElement) {
           options.block = 'start';
-          this.domObserver.stop();
-          target.style.scrollMarginTop = options.offset + 'px';
-          this.domObserver.start();
+          this.withoutMutationObserver(() => target.style.scrollMarginTop = options.offset + 'px');
         }
         target.scrollIntoView(options);
 
@@ -373,9 +365,7 @@ export class EditorView {
           else if (options?.offset && target instanceof HTMLElement) {
             // 若已经发生滚动，则 200ms 后，认为滚动停止
             setTimeout(() => {
-              this.domObserver.stop();
-              target.style.scrollMarginTop = '';
-              this.domObserver.start();
+              this.withoutMutationObserver(() => target.style.scrollMarginTop = '');
               this.lockScroll = false;
             }, 200);
           }
@@ -384,6 +374,12 @@ export class EditorView {
 
       scrollTo(targetDom, options);
     }
+  }
+
+  private withoutMutationObserver(fn: () => void) {
+    this.domObserver.stop();
+    fn();
+    this.domObserver.start();
   }
 
   private getViewport() {
