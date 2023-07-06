@@ -70,6 +70,10 @@ export class EditorView {
 
   private upwardClean = true;
 
+  private scrollTimer = 0;
+
+  private lockScroll = false;
+
   /// Create a view. `place` may be a DOM node that the editor should
   /// be appended to, a function that will place it into the document,
   /// or an object whose `mount` property holds the node to use as the
@@ -129,6 +133,10 @@ export class EditorView {
     return this._props
   }
 
+  get isScrolling() {
+    return !!this.scrollTimer;
+  }
+
   /**
    *
    */
@@ -162,6 +170,15 @@ export class EditorView {
     const viewport = this.getViewport();
 
     if (!viewport) return;
+
+    clearTimeout(this.scrollTimer);
+    this.scrollTimer = setTimeout(() => {
+      this.scrollTimer = 0;
+      // this.lockScroll = false;
+      // this.docView.updateViewport(this, this.getViewport()!);
+    }, 100);
+
+    if (this.lockScroll) return;
 
     this.domObserver.stop()
 
@@ -277,7 +294,7 @@ export class EditorView {
         // TODO: 只有变更才调用
           viewport && !this.trackSkipUpdate && this.docView.updateViewport(this, this.getViewport()!);
         });
-        this.startIdleRenderTask();
+        // this.startIdleRenderTask();
         this.trackSkipUpdate = false;
         if (chromeKludge && !this.trackWrites) forceSelUpdate = true
       }
@@ -317,6 +334,48 @@ export class EditorView {
       if (target.nodeType == 1) scrollRectIntoView(this, (target as HTMLElement).getBoundingClientRect(), startDOM)
     } else {
       scrollRectIntoView(this, this.coordsAtPos(this.state.selection.head, 1), startDOM)
+    }
+  }
+
+  scrollIntoView(dom: Element, options?: ScrollIntoViewOptions & { offset?: number }) {
+    if (!this._props.viewport) return dom.scrollIntoView(options);
+
+    const target = dom.pmViewDesc as unknown as ViewDescRenderer;
+    if (!target || !target.parent) return console.warn(`This node isn't a prosemirror node`);
+
+    const pos = !target.isRendered ? target.posAtStart : -1;
+
+    const viewport = this.getViewport()!;
+    const top = target.getOffsetTopToRoot();
+    viewport.scrollTop = top - viewport.scrollHeight / 2;
+    this.docView.updateViewport(this, viewport, { preventUnmount: true });
+
+    const targetDom = pos === -1 ? dom : this.nodeDOM(pos);
+
+    if (targetDom instanceof Element) {
+      const scrollTo = (target: Element, options?: ScrollIntoViewOptions & { offset?: number }) => {
+        this.lockScroll = true;
+
+        if (options?.offset && target instanceof HTMLElement) {
+          options.block = 'start';
+          target.style.scrollMarginTop = options.offset + 'px';
+        }
+        target.scrollIntoView(options);
+
+        // smooth 模式下，如果在滚动触发前，target 的位置（offsetTop）发生变化，则滚动行为会被取消；若 1 帧后没有触发滚动，则再次 scroll
+        setTimeout(() => {
+          if (!this.isScrolling) scrollTo(target, options);
+          else if (options?.offset && target instanceof HTMLElement) {
+            // 若已经发生滚动，则 200ms 后，认为滚动停止
+            setTimeout(() => {
+              target.style.scrollMarginTop = '';
+              this.lockScroll = false;
+            }, 200);
+          }
+        }, 16);
+      }
+
+      scrollTo(targetDom, options);
     }
   }
 

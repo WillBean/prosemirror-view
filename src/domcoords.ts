@@ -257,14 +257,24 @@ function elementFromPoint(element: HTMLElement, coords: {top: number, left: numb
   return element
 }
 
+// TODO: 目前看业务调用的逻辑，不存在获取视口外节点的情况暂时不处理，加个 log
 // Given an x,y position on the editor, get the position in the document.
 export function posAtCoords(view: EditorView, coords: {top: number, left: number}) {
   let doc = view.dom.ownerDocument, node: Node | undefined, offset = 0
   let caret = caretFromPoint(doc, coords.left, coords.top)
   if (caret) ({node, offset} = caret)
 
+  if (node instanceof HTMLElement && node.classList.contains('prosemirror-line-placeholder')) {
+    console.warn('Can not call posAtCoords for out of the viewport coords', node);
+  }
+
   let elt = ((view.root as any).elementFromPoint ? view.root : doc)
               .elementFromPoint(coords.left, coords.top) as HTMLElement
+
+  if (elt instanceof HTMLElement && elt.classList.contains('prosemirror-line-placeholder')) {
+    console.warn('Can not call posAtCoords for out of the viewport coords', elt);
+  }
+
   let pos
   if (!elt || !view.dom.contains(elt.nodeType != 1 ? elt.parentNode : elt)) {
     let box = view.dom.getBoundingClientRect()
@@ -328,6 +338,8 @@ const BIDI = /[\u0590-\u05f4\u0600-\u06ff\u0700-\u08ac]/
 // character at that position, relative to the window.
 export function coordsAtPos(view: EditorView, pos: number, side: number): Rect {
   let {node, offset, atom} = view.docView.domFromPos(pos, side < 0 ? -1 : 1)
+
+  if (!node.isConnected && node.pmViewDesc) return flattenH(node.pmViewDesc.getBoundingRect(), true);
 
   let supportEmptyRange = browser.webkit || browser.gecko
   if (node.nodeType == 3) {

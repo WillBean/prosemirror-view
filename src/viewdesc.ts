@@ -8,7 +8,7 @@ import {EditorView} from "./index"
 import schedule, { SchedulePriority } from "./schedule"
 
 declare global {
-  interface Node { pmViewDesc?: ViewDesc }
+  interface Node { pmViewDesc?: ViewDescRenderer }
 }
 
 /// By default, document nodes are rendered using the result of the
@@ -128,6 +128,10 @@ interface IPlaceholderInfo {
   };
 }
 
+interface IUpdateViewportOptions {
+  preventUnmount?: boolean;
+}
+
 const NOT_DIRTY = 0, CHILD_DIRTY = 1, CONTENT_DIRTY = 2, NODE_DIRTY = 3
 enum LayoutMode {
   Vertical = 'vertical',
@@ -151,8 +155,10 @@ class PlaceholderInfo {
   dom: HTMLDivElement;
   style: IStyle;
 
-  constructor() {
+  constructor(public parent: ViewDescRenderer) {
     this.dom = document.createElement('div');
+    this.dom.classList.add('prosemirror-line-placeholder');
+    this.dom.pmViewDesc = parent;
     this.range = [-1, -1];
     this.style = {
       height: 0,
@@ -438,20 +444,43 @@ export abstract class ViewDescRenderer {
   }
 
   /**
-   * 获取节点到 Root 的 rect
+   * 获取节点到 Root 的距离
    */
   getOffsetTopToRoot() {
     let top = 0;
     let child: ViewDescRenderer | undefined = this;
     let parent = this.parent;
-    while (parent) {
+    while (parent && child) {
       const index = parent.children.indexOf(child);
       top += parent.getRects()[index].top;
 
-      child = this.parent;
-      parent = this.parent?.parent;
+      child = child?.parent;
+      parent = child?.parent;
     }
     return top;
+  }
+
+  /**
+   * 获取节点到视口的 rect
+   */
+  getBoundingRect() {
+    if (this.dom.isConnected && this.dom instanceof HTMLElement) return this.dom.getBoundingClientRect();
+
+    let root = this.parent;
+    while (root && !root.isRoot) {
+      root = root.parent;
+    }
+
+    if (!root || !(root.dom instanceof HTMLElement)) throw new Error('Can not find root node view desc');
+
+    const rootRect = root.dom.getBoundingClientRect();
+    const top = this.getOffsetTopToRoot();
+    return {
+      top: top + rootRect.top,
+      bottom: top + rootRect.top + this.layoutInfo.height,
+      left: rootRect.left,
+      right: rootRect.right,
+    }
   }
 
   /**
@@ -462,10 +491,12 @@ export abstract class ViewDescRenderer {
    * 4. 对可能变化的节点递归处理其子节点的视口情况
    * 5. 挂载或卸载相应节点，更新 Placeholder
    */
-  updateViewport(view: EditorView, viewport: IViewport) {
+  updateViewport(view: EditorView, viewport: IViewport, options: IUpdateViewportOptions = {}) {
     if (this.node?.isTextblock) return;
 
     const { mounts, unmounts, viewportNodes, bufferNodes } = this.calculateViewport(view, viewport);
+
+    if (options.preventUnmount) unmounts.clear();
 
     this.bufferNodes = bufferNodes;
     this.viewportNodes = viewportNodes;
@@ -625,7 +656,7 @@ export abstract class ViewDescRenderer {
       const reuse = this.usedPlaceholder.find(({ range }) => {
         return end >= range[0] && start <= range[1];
       });
-      const info = reuse || this.placeholderPool.pop() || new PlaceholderInfo();
+      const info = reuse || this.placeholderPool.pop() || new PlaceholderInfo(this);
       info.range = [start, end];
       return info;
     });
@@ -1556,13 +1587,14 @@ class TrailingHackViewDesc extends ViewDesc {
   get ignoreForCoords() { return this.dom.nodeName == "IMG" }
 }
 
-const DEFAULT_FAKE_DOM = document.createElement('div');
+// const DEFAULT_FAKE_DOM = document.createElement('div');
 class FakeNodeViewDesc extends NodeViewDesc {
   dom: HTMLElement;
 
   constructor(parent: ViewDesc | undefined, node: Node, outerDeco: readonly Decoration[], innerDeco: DecorationSource,
     view: EditorView, pos: number) {
-      const dom = DEFAULT_FAKE_DOM;
+      // 暂时不能用 DEFAULT_FAKE_DOM，因为 dom 与 ViewDesc 存在关联关系
+      const dom = document.createElement('div');
       super(parent, node, outerDeco, innerDeco, dom, dom, dom, view, pos)
       this.dom = dom;
       this.isRendered = false;
