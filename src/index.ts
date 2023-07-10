@@ -68,7 +68,7 @@ export class EditorView {
 
   private lastScrollTop = 0;
 
-  private upwardClean = true;
+  private upwardClean = false;
 
   private scrollTimer = 0;
 

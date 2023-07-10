@@ -568,8 +568,9 @@ export abstract class ViewDescRenderer {
     // 最后写 dom
     const { mounts: realMounts, unmounts: realUnmounts } = this.mountChildren(view, mounts, unmounts);
 
-    this.layoutMountsInSchedule();
+    this.triggerEvent(prevBufferNodes, prevViewportNodes);
 
+    this.layoutMountsInSchedule();
   }
 
   /// @internal
@@ -683,6 +684,27 @@ export abstract class ViewDescRenderer {
 
   destroy() {
     this.prerenderPool?.remove();
+  }
+
+  // TODO: unmount 的子节点
+  private triggerEvent(bufferNodes: IBufferNodes, viewportNodes: ViewDescSet) {
+    const { appears, disappears } = this.getDiffs(this.viewportNodes, viewportNodes);
+    appears.forEach(node => node.node?.type.spec.enterViewport?.(node, node.node));
+    disappears.forEach(node => node.node?.type.spec.leaveViewport?.(node, node.node));
+    const { appears: bufferAppears, disappears: bufferDisappears } = this.getDiffs(
+      new Set([...this.bufferNodes.upward, ...this.bufferNodes.downward]),
+      new Set([...bufferNodes.upward, ...bufferNodes.downward]),
+    );
+    bufferAppears.forEach(node => node.node?.type.spec.enterViewport?.(node, node.node));
+    bufferDisappears.forEach(node => node.node?.type.spec.leaveViewport?.(node, node.node));
+  }
+
+  private getDiffs(nodes: ViewDescSet, others: ViewDescSet) {
+    const appears: ViewDescSet = new Set();
+    nodes.forEach(node => !others.has(node) && appears.add(node));
+    const disappears: ViewDescSet = new Set();
+    others.forEach(node => !nodes.has(node) && disappears.add(node));
+    return { appears, disappears };
   }
 
   private edgeDescNodes(
