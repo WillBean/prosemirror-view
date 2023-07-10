@@ -94,6 +94,13 @@ export interface NodeView {
 //
 // They form a doubly-linked mutable tree, starting at `view.docView`.
 
+type ViewDescSet = Set<ViewDescRenderer>;
+
+interface IBufferNodes {
+  upward: ViewDescSet;
+  downward: ViewDescSet;
+}
+
 interface IStyle {
   height: number;
   marginTop: number;
@@ -176,20 +183,20 @@ export abstract class ViewDescRenderer {
   /**
    * 当前所有已经挂载的节点列表
    */
-  mountedNodes = new Set<ViewDescRenderer>();
+  mountedNodes: ViewDescSet = new Set();
 
   /**
    * 当前处于视口外 buffer 内的节点列表
    */
-  bufferNodes = {
-    upward: new Set<ViewDescRenderer>(),
-    downward: new Set<ViewDescRenderer>(),
+  bufferNodes: IBufferNodes = {
+    upward: new Set(),
+    downward: new Set(),
   }
 
   /**
    * 当前处于视口内的节点列表
    */
-  viewportNodes = new Set<ViewDescRenderer>();
+  viewportNodes: ViewDescSet = new Set();
 
   /**
    * 该节点是否保留在 DOM 不卸载
@@ -399,12 +406,12 @@ export abstract class ViewDescRenderer {
    * 当前 buffer 内的节点 {bufferNodes}
    */
   private calculateViewport(view: EditorView, viewport: IViewport) {
-    const shouldMountNodes = new Set<ViewDescRenderer>();
-    const bufferNodes = {
-      upward: new Set<ViewDescRenderer>(),
-      downward: new Set<ViewDescRenderer>(),
+    const shouldMountNodes: ViewDescSet = new Set();
+    const bufferNodes: IBufferNodes = {
+      upward: new Set(),
+      downward: new Set(),
     };
-    const viewportNodes = new Set<ViewDescRenderer>();
+    const viewportNodes: ViewDescSet = new Set();
 
     const { scrollTop, scrollHeight, buffer = 0 } = viewport;
     const scrollBottom = scrollTop + scrollHeight;
@@ -544,6 +551,8 @@ export abstract class ViewDescRenderer {
 
     if (options.preventUnmount) unmounts.clear();
 
+    const prevBufferNodes = this.bufferNodes
+    const prevViewportNodes = this.viewportNodes;
     this.bufferNodes = bufferNodes;
     this.viewportNodes = viewportNodes;
 
@@ -554,17 +563,17 @@ export abstract class ViewDescRenderer {
     this.ensureChildrenRendered(view, mounts);
 
     // 再调用子节点的 update
-    this.updateDescendantViewport(view, mounts, viewport);
+    this.updateDescendantViewport(view, mounts, prevBufferNodes,prevViewportNodes, viewport);
 
     // 最后写 dom
     const { mounts: realMounts, unmounts: realUnmounts } = this.mountChildren(view, mounts, unmounts);
 
-    this.layoutMountsInSchedule(view, realMounts);
+    this.layoutMountsInSchedule();
 
   }
 
   /// @internal
-  ensureChildrenRendered(view: EditorView, mounts: Set<ViewDescRenderer>, parentPos?: number) {
+  ensureChildrenRendered(view: EditorView, mounts: ViewDescSet, parentPos?: number) {
     if (!Array.from(mounts).find(child => child instanceof MarkViewDesc || !child.isRendered)) return;
     const pos = parentPos ?? (this instanceof NodeViewDesc && this.parent?.posBeforeChild(this) || 0);
     return this.children.reduce((pos, child, index) => {
@@ -593,13 +602,18 @@ export abstract class ViewDescRenderer {
 
   /**
    * 为减少计算量，不对 unmount 的子节点再进行卸载
-   * 仅对 mounts 和 this.mountedNodes 中处于视口边界的两个节点计算。
+   * 仅对 mounts 和处于视口边界的两个节点计算。
    */
-  private updateDescendantViewport(view: EditorView, mounts: Set<ViewDescRenderer>, viewport: IViewport) {
+  private updateDescendantViewport(
+    view: EditorView,
+    mounts: ViewDescSet,
+    bufferNodes: IBufferNodes,
+    viewportNodes: ViewDescSet,
+    viewport: IViewport,
+  ) {
     const { scrollTop, scrollHeight, buffer } = viewport;
-    // const [first, ...rest] = bufferNodes.size ? bufferNodes : viewportNodes;
-    // const edgeNodes = new Set([first, rest[rest.length - 1]]);
-    const layouts = this.getRects().filter(({ node }) => mounts.has(node) || this.mountedNodes.has(node));
+    const edgeNodes = this.mode === LayoutMode.Horizontal ? this.mountedNodes : this.edgeDescNodes(bufferNodes, viewportNodes);
+    const layouts = this.getRects().filter(({ node }) => mounts.has(node) || edgeNodes.has(node));
     layouts.forEach(({ node, top, bottom, height }) => {
       // TODO: 改回高度
       const childViewportHeight = scrollTop <= top && bottom <= scrollTop + scrollHeight ?
@@ -617,7 +631,7 @@ export abstract class ViewDescRenderer {
   /**
    * 对传入的 mounts 和 unmounts 节点进行挂载和卸载
    */
-  mountChildren(view?: EditorView, mounts?: Set<ViewDescRenderer>, unmounts?: Set<ViewDescRenderer>) {
+  mountChildren(view?: EditorView, mounts?: ViewDescSet, unmounts?: ViewDescSet) {
     // validate
     mounts = new Set(mounts && Array.from(mounts).filter(node => !this.mountedNodes.has(node)));
     unmounts = new Set(unmounts && Array.from(unmounts).filter(node => !node.shouldKeep(view) && this.mountedNodes.has(node)));
@@ -669,6 +683,18 @@ export abstract class ViewDescRenderer {
 
   destroy() {
     this.prerenderPool?.remove();
+  }
+
+  private edgeDescNodes(
+    bufferNodes: IBufferNodes,
+    viewportNodes: ViewDescSet,
+  ) {
+    const [prevFirst] = bufferNodes.upward.size ? bufferNodes.upward : viewportNodes;
+    const [...prevRest] = bufferNodes.downward.size ? bufferNodes.downward : viewportNodes;
+    const [first] = this.bufferNodes.upward.size ? this.bufferNodes.upward : this.viewportNodes;
+    const [...rest] = this.bufferNodes.downward.size ? this.bufferNodes.downward : viewportNodes;
+    const edgeNodes = new Set([prevFirst, prevRest[prevRest.length - 1], first, rest[rest.length - 1]]);
+    return edgeNodes;
   }
 
   protected getSelectedTarget(node: DOMNode, offset: number) {
@@ -740,7 +766,7 @@ export abstract class ViewDescRenderer {
     info.style = style;
   }
 
-  private layoutMountsInSchedule(view: EditorView, mounts: Set<ViewDescRenderer>) {
+  private layoutMountsInSchedule() {
     const needLayouts = Array.from(this.mountedNodes).filter(node => node.layoutInfo.isDirty);
     needLayouts.length && schedule.addTask({
       priority: SchedulePriority.High,
@@ -794,7 +820,7 @@ export abstract class ViewDescRenderer {
     this.dom.parentElement.appendChild(this.prerenderPool);
   }
 
-  private layoutChildren(children: Set<ViewDescRenderer>) {
+  private layoutChildren(children: ViewDescSet) {
     children.forEach(child => child.layout());
   }
 }

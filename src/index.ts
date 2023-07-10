@@ -411,7 +411,7 @@ export class EditorView {
 
     return {
       buffer: viewport.getBuffer?.(),
-      scrollTop: viewport.getScrollTop() - viewport.getOffsetToScroller(),
+      scrollTop: viewport.getScrollTop(),
       scrollHeight: viewport.getScrollHeight(),
     };
   }
@@ -1053,7 +1053,6 @@ export interface DirectEditorProps extends EditorProps {
     setScrollTop(top: number): void;
     getScrollTop(): number;
     getScrollHeight(): number;
-    getOffsetToScroller(): number;
     getForceLayoutDistance?(): number;
   },
 }
