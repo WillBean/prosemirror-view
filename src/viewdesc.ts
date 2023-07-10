@@ -248,8 +248,8 @@ export abstract class ViewDescRenderer {
   getRects(): IRect[] {
     if (this.rects) return this.rects;
 
-    this.rects = this.mode === LayoutMode.Horizontal ?
-      this.children.map((child) => {
+    if (this.mode === LayoutMode.Horizontal) {
+      this.rects = this.children.map((child) => {
         const { height, marginTop, marginBottom, offsetTopToParent } = child.layoutInfo;
         return {
           top: offsetTopToParent,
@@ -260,23 +260,29 @@ export abstract class ViewDescRenderer {
           bottom: height + marginBottom,
           node: child,
         }
-      }) :
-      this.children
-        .reduce<IRect[]>((layouts, child, index) => {
-          const last = layouts[index - 1] ?? { top: 0, marginBottom: 0, height: 0 };
-          const { height, marginTop, marginBottom, offsetTopToParent } = child.layoutInfo!;
-          const curTop = last.top + last.height + Math.max(last.marginBottom, marginTop) + offsetTopToParent;
-          layouts.push({
-            left: 0,
-            top: curTop,
-            bottom: curTop + height,
-            marginTop,
-            marginBottom,
-            height,
-            node: child,
-          });
-          return layouts;
-        }, []);
+      });
+    } else {
+      const len = this.children.length;
+      this.rects = new Array(len);
+
+      for (let index = 0; index < len; index++) {
+        const child = this.children[index];
+        const last = index > 0 ? this.rects[index - 1] : { top: 0, marginBottom: 0, height: 0 };
+        const { height, marginTop, marginBottom, offsetTopToParent } = child.layoutInfo;
+        const curTop = last.top + last.height + Math.max(last.marginBottom, marginTop) + offsetTopToParent;
+
+        this.rects[index] = {
+          left: 0,
+          top: curTop,
+          bottom: curTop + height,
+          marginTop,
+          marginBottom,
+          height,
+          node: child,
+        };
+      }
+    }
+
     return this.rects;
   }
 
@@ -1967,6 +1973,7 @@ class ViewTreeUpdater {
         let child = this.top.children[i]
         if (child.matchesNode(node, outerDeco, innerDeco) && !this.preMatch.matched.has(child)) {
           found = i
+          if (child.node !== node) child.node = node;
           break
         }
       }
